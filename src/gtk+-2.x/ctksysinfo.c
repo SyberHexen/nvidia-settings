@@ -22,7 +22,10 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/utsname.h>
 
 #include <gtk/gtk.h>
@@ -38,6 +41,18 @@
 #ifdef CTK_HAVE_VULKAN_HEADERS
 # define VK_NO_PROTOTYPES
 # include <vulkan/vulkan.h>
+#endif
+
+#if defined(__has_include)
+# if __has_include(<EGL/egl.h>) && __has_include(<EGL/eglext.h>)
+#  define CTK_HAVE_EGL_HEADERS 1
+# endif
+#endif
+
+#ifdef CTK_HAVE_EGL_HEADERS
+# define EGL_NO_PROTOTYPES
+# include <EGL/egl.h>
+# include <EGL/eglext.h>
 #endif
 
 #include "ctksysinfo.h"
@@ -306,6 +321,287 @@ static gboolean probe_vulkan(gchar **loader_version, GList **devices,
 #endif
 
 
+/* ---- OpenGL (EGL device platform) --------------------------------------- */
+
+typedef struct {
+    gchar *gpu;          /* "GPU_0", or NULL for a software device */
+    gchar *renderer;     /* GL_RENDERER */
+    gchar *version;      /* GL_VERSION */
+    gchar *glsl;         /* GL_SHADING_LANGUAGE_VERSION */
+} GlDev;
+
+
+static void gldev_free(gpointer data)
+{
+    GlDev *d = data;
+    g_free(d->gpu);
+    g_free(d->renderer);
+    g_free(d->version);
+    g_free(d->glsl);
+    g_free(d);
+}
+
+
+#ifdef CTK_HAVE_EGL_HEADERS
+
+#define CTK_GL_VENDOR                   0x1F00
+#define CTK_GL_RENDERER                 0x1F01
+#define CTK_GL_VERSION                  0x1F02
+#define CTK_GL_SHADING_LANGUAGE_VERSION 0x8B8C
+
+typedef const unsigned char *(*CtkGlGetStringFn)(unsigned int);
+
+/*
+ * Mesa's EGL prints warnings while it probes GPUs it has no driver for
+ * (e.g. "failed to create dri2 screen" for the NVIDIA GPU).  They are
+ * expected here, so silence stderr around device enumeration and display
+ * initialization.
+ */
+static int quiet_stderr(void)
+{
+    int saved, devnull;
+
+    fflush(stderr);
+    saved = dup(STDERR_FILENO);
+    devnull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (saved >= 0 && devnull >= 0) {
+        dup2(devnull, STDERR_FILENO);
+    }
+    if (devnull >= 0) close(devnull);
+    return saved;
+}
+
+static void restore_stderr(int saved)
+{
+    if (saved >= 0) {
+        fflush(stderr);
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+}
+
+static gboolean has_word(const char *list, const char *word)
+{
+    size_t len = strlen(word);
+    const char *p = list;
+
+    while (p && (p = strstr(p, word))) {
+        if ((p == list || p[-1] == ' ') && (p[len] == ' ' || p[len] == '\0')) {
+            return TRUE;
+        }
+        p += len;
+    }
+    return FALSE;
+}
+
+
+/*
+ * Create an OpenGL context on every EGL device and read its strings.  The
+ * EGL device platform addresses each GPU directly, so this works for the
+ * render offload GPU as well as the display GPU without any environment
+ * variables.  Returns FALSE when EGL device enumeration is unavailable.
+ */
+static gboolean probe_opengl(GList **devices)
+{
+    void *h;
+    PFNEGLGETPROCADDRESSPROC get_proc;
+    PFNEGLQUERYDEVICESEXTPROC query_devices;
+    PFNEGLQUERYDEVICESTRINGEXTPROC query_device_string;
+    PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display;
+    PFNEGLINITIALIZEPROC initialize;
+    PFNEGLTERMINATEPROC terminate;
+    PFNEGLQUERYSTRINGPROC query_string;
+    PFNEGLBINDAPIPROC bind_api;
+    PFNEGLCHOOSECONFIGPROC choose_config;
+    PFNEGLCREATECONTEXTPROC create_context;
+    PFNEGLDESTROYCONTEXTPROC destroy_context;
+    PFNEGLCREATEPBUFFERSURFACEPROC create_pbuffer;
+    PFNEGLDESTROYSURFACEPROC destroy_surface;
+    PFNEGLMAKECURRENTPROC make_current;
+    PFNEGLRELEASETHREADPROC release_thread;
+    CtkGlGetStringFn get_string;
+    const char *client_exts;
+    EGLDeviceEXT *devs;
+    EGLint n = 0, i;
+    int saved_stderr;
+
+    *devices = NULL;
+
+    h = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!h) {
+        return FALSE;
+    }
+#define SYM(var, type, name) var = (type) dlsym(h, name)
+    SYM(get_proc, PFNEGLGETPROCADDRESSPROC, "eglGetProcAddress");
+    SYM(initialize, PFNEGLINITIALIZEPROC, "eglInitialize");
+    SYM(terminate, PFNEGLTERMINATEPROC, "eglTerminate");
+    SYM(query_string, PFNEGLQUERYSTRINGPROC, "eglQueryString");
+    SYM(bind_api, PFNEGLBINDAPIPROC, "eglBindAPI");
+    SYM(choose_config, PFNEGLCHOOSECONFIGPROC, "eglChooseConfig");
+    SYM(create_context, PFNEGLCREATECONTEXTPROC, "eglCreateContext");
+    SYM(destroy_context, PFNEGLDESTROYCONTEXTPROC, "eglDestroyContext");
+    SYM(create_pbuffer, PFNEGLCREATEPBUFFERSURFACEPROC,
+        "eglCreatePbufferSurface");
+    SYM(destroy_surface, PFNEGLDESTROYSURFACEPROC, "eglDestroySurface");
+    SYM(make_current, PFNEGLMAKECURRENTPROC, "eglMakeCurrent");
+    SYM(release_thread, PFNEGLRELEASETHREADPROC, "eglReleaseThread");
+#undef SYM
+    if (!get_proc || !initialize || !terminate || !query_string ||
+        !bind_api || !choose_config || !create_context || !destroy_context ||
+        !create_pbuffer || !destroy_surface || !make_current) {
+        return FALSE;
+    }
+
+    client_exts = query_string(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    if (!client_exts || !has_word(client_exts, "EGL_EXT_device_enumeration") ||
+        !has_word(client_exts, "EGL_EXT_platform_device")) {
+        return FALSE;
+    }
+    query_devices = (PFNEGLQUERYDEVICESEXTPROC)
+        get_proc("eglQueryDevicesEXT");
+    query_device_string = (PFNEGLQUERYDEVICESTRINGEXTPROC)
+        get_proc("eglQueryDeviceStringEXT");
+    get_platform_display = (PFNEGLGETPLATFORMDISPLAYEXTPROC)
+        get_proc("eglGetPlatformDisplayEXT");
+    get_string = (CtkGlGetStringFn) get_proc("glGetString");
+    if (!query_devices || !query_device_string || !get_platform_display ||
+        !get_string) {
+        return FALSE;
+    }
+    saved_stderr = quiet_stderr();
+    if (!query_devices(0, NULL, &n) || n <= 0) {
+        restore_stderr(saved_stderr);
+        return FALSE;
+    }
+    devs = g_new0(EGLDeviceEXT, n);
+    if (!query_devices(n, devs, &n)) {
+        n = 0;
+    }
+    restore_stderr(saved_stderr);
+
+    for (i = 0; i < n; i++) {
+        const char *dexts = query_device_string(devs[i], EGL_EXTENSIONS);
+        const char *file = NULL;
+        EGLDisplay dpy;
+        EGLint major, minor, nconf = 0;
+        EGLConfig config = NULL;
+        EGLContext ctx;
+        EGLSurface surf = EGL_NO_SURFACE;
+        gboolean surfaceless, no_config, ok;
+        const char *dpy_exts;
+        gchar *gpu = NULL;
+        GList *l;
+        static const EGLint pbuf_attrs[] = {
+            EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE
+        };
+        EGLint conf_attrs[] = {
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+            EGL_NONE
+        };
+
+        if (dexts && has_word(dexts, "EGL_EXT_device_drm")) {
+            file = query_device_string(devs[i], EGL_DRM_DEVICE_FILE_EXT);
+        }
+        if (file) {
+            gchar *card = g_path_get_basename(file);
+            gpu = drm_gpu_name(card);
+            g_free(card);
+        } else if (!dexts || !has_word(dexts, "EGL_MESA_device_software")) {
+            continue;   /* neither a DRM GPU nor a software renderer */
+        }
+
+        /* Several EGL vendors may expose the same GPU; keep the first one
+         * that can create a context. */
+        for (l = *devices; l; l = l->next) {
+            if (g_strcmp0(((GlDev *) l->data)->gpu, gpu) == 0) break;
+        }
+        if (l) {
+            g_free(gpu);
+            continue;
+        }
+
+        saved_stderr = quiet_stderr();
+        dpy = get_platform_display(EGL_PLATFORM_DEVICE_EXT, devs[i], NULL);
+        ok = (dpy != EGL_NO_DISPLAY && initialize(dpy, &major, &minor));
+        restore_stderr(saved_stderr);
+        if (!ok) {
+            g_free(gpu);
+            continue;
+        }
+        dpy_exts = query_string(dpy, EGL_EXTENSIONS);
+        surfaceless = dpy_exts &&
+                      has_word(dpy_exts, "EGL_KHR_surfaceless_context");
+        /* Device displays usually have no configs at all; contexts need
+         * EGL_KHR_no_config_context there. */
+        no_config = surfaceless && dpy_exts &&
+                    has_word(dpy_exts, "EGL_KHR_no_config_context");
+        if (surfaceless) {
+            conf_attrs[2] = EGL_NONE;   /* any surface type */
+        }
+        if (no_config) {
+            config = EGL_NO_CONFIG_KHR;
+            ok = TRUE;
+        } else {
+            ok = choose_config(dpy, conf_attrs, &config, 1, &nconf) &&
+                 nconf > 0;
+        }
+
+        if (ok && bind_api(EGL_OPENGL_API) &&
+            (ctx = create_context(dpy, config, EGL_NO_CONTEXT, NULL))
+                != EGL_NO_CONTEXT) {
+
+            if (!surfaceless) {
+                surf = create_pbuffer(dpy, config, pbuf_attrs);
+            }
+            if ((surfaceless || surf != EGL_NO_SURFACE) &&
+                make_current(dpy, surf, surf, ctx)) {
+                const unsigned char *r = get_string(CTK_GL_RENDERER);
+                const unsigned char *v = get_string(CTK_GL_VERSION);
+                const unsigned char *g =
+                    get_string(CTK_GL_SHADING_LANGUAGE_VERSION);
+
+                if (r && v) {
+                    GlDev *d = g_new0(GlDev, 1);
+                    d->gpu = gpu;
+                    gpu = NULL;
+                    d->renderer = g_strdup((const char *) r);
+                    d->version = g_strdup((const char *) v);
+                    d->glsl = g ? g_strdup((const char *) g) : NULL;
+                    *devices = g_list_append(*devices, d);
+                }
+                make_current(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                             EGL_NO_CONTEXT);
+            }
+            if (surf != EGL_NO_SURFACE) {
+                destroy_surface(dpy, surf);
+            }
+            destroy_context(dpy, ctx);
+        }
+        terminate(dpy);
+        g_free(gpu);
+    }
+
+    g_free(devs);
+    if (release_thread) {
+        release_thread();
+    }
+    /* Keep libEGL mapped: vendor libraries may register atexit handlers. */
+    return TRUE;
+}
+
+#else /* !CTK_HAVE_EGL_HEADERS */
+
+static gboolean probe_opengl(GList **devices)
+{
+    *devices = NULL;
+    return FALSE;
+}
+
+#endif
+
+
+/* Sort by GPU_N; both VkDev and GlDev start with their "GPU_N" name. */
 static gint compare_vkdev(gconstpointer a, gconstpointer b)
 {
     const VkDev *x = a, *y = b;
@@ -322,21 +618,29 @@ static gint compare_vkdev(gconstpointer a, gconstpointer b)
 
 
 /* "Mesa 25.2.4 (git-abc)" -> "Mesa 25.2.4" */
-static gchar *mesa_version(GList *devices)
+static gchar *mesa_version(GList *devices, GList *gl_devices)
 {
     GList *l;
+    const gchar *m = NULL, *end;
 
-    for (l = devices; l; l = l->next) {
+    /* Prefer RADV's version, then any Mesa OpenGL driver on a real GPU. */
+    for (l = devices; l && !m; l = l->next) {
         VkDev *d = l->data;
-        const gchar *m;
-        if (!d->radv || !d->driver_info) continue;
-        m = strstr(d->driver_info, "Mesa");
-        if (m) {
-            const gchar *end = strstr(m, " (");
-            return end ? g_strndup(m, end - m) : g_strdup(m);
+        if (d->radv && d->driver_info) {
+            m = strstr(d->driver_info, "Mesa");
         }
     }
-    return NULL;
+    for (l = gl_devices; l && !m; l = l->next) {
+        GlDev *d = l->data;
+        if (d->gpu && d->version) {
+            m = strstr(d->version, "Mesa ");
+        }
+    }
+    if (!m) {
+        return NULL;
+    }
+    end = strstr(m, " (");
+    return end ? g_strndup(m, end - m) : g_strdup(m);
 }
 
 
@@ -400,7 +704,8 @@ static gchar *x_display_driver(void)
 
 
 static void add_amd_section(GtkWidget *vbox, GList *amd_gpus,
-                            GList *vk_devices, gboolean have_vulkan)
+                            GList *vk_devices, gboolean have_vulkan,
+                            GList *gl_devices)
 {
     GtkWidget *table = ctk_section_table_new(vbox, "AMD Driver Information");
     struct utsname uts;
@@ -425,10 +730,8 @@ static void add_amd_section(GtkWidget *vbox, GList *amd_gpus,
                                                 : "None (not running on X11)"));
     g_free(s);
 
-    mesa = mesa_version(vk_devices);
-    row(table, &r, "Mesa Version:",
-        mesa ? mesa : have_vulkan ? "Unknown (no RADV Vulkan driver)"
-                                  : "Unknown");
+    mesa = mesa_version(vk_devices, gl_devices);
+    row(table, &r, "Mesa Version:", mesa ? mesa : "Unknown");
     g_free(mesa);
 
     for (l = amd_gpus; l; l = l->next) {
@@ -448,10 +751,10 @@ static void add_amd_section(GtkWidget *vbox, GList *amd_gpus,
 /* ---- entry points ------------------------------------------------------- */
 
 void ctk_sysinfo_add_sections(GtkWidget *vbox, gboolean *have_vulkan,
-                              gboolean *have_amd)
+                              gboolean *have_gl, gboolean *have_amd)
 {
     gchar *loader = NULL, *error = NULL;
-    GList *devices = NULL, *amd_gpus, *l;
+    GList *devices = NULL, *gl_devices = NULL, *amd_gpus, *l;
 
     *have_vulkan = probe_vulkan(&loader, &devices, &error);
     devices = g_list_sort(devices, compare_vkdev);
@@ -476,13 +779,36 @@ void ctk_sysinfo_add_sections(GtkWidget *vbox, gboolean *have_vulkan,
         }
     }
 
+    *have_gl = probe_opengl(&gl_devices);
+    gl_devices = g_list_sort(gl_devices, compare_vkdev);
+    if (*have_gl && gl_devices) {
+        GtkWidget *table = ctk_section_table_new(vbox, "OpenGL Information");
+        gint r = 0;
+
+        for (l = gl_devices; l; l = l->next) {
+            GlDev *d = l->data;
+            gchar *name = d->gpu ? g_strdup_printf("%s:", d->gpu)
+                                 : g_strdup("Software:");
+            gchar *value = d->glsl ?
+                g_strdup_printf("%s\nOpenGL %s, GLSL %s", d->renderer,
+                                d->version, d->glsl) :
+                g_strdup_printf("%s\nOpenGL %s", d->renderer, d->version);
+            row(table, &r, name, value);
+            g_free(value);
+            g_free(name);
+        }
+    } else {
+        *have_gl = FALSE;
+    }
+
     amd_gpus = amdgpu_enumerate();
     *have_amd = (amd_gpus != NULL);
     if (amd_gpus) {
-        add_amd_section(vbox, amd_gpus, devices, *have_vulkan);
+        add_amd_section(vbox, amd_gpus, devices, *have_vulkan, gl_devices);
     }
 
     amdgpu_free_list(amd_gpus);
+    g_list_free_full(gl_devices, gldev_free);
     g_list_free_full(devices, vkdev_free);
     g_free(loader);
     g_free(error);
@@ -490,7 +816,8 @@ void ctk_sysinfo_add_sections(GtkWidget *vbox, gboolean *have_vulkan,
 
 
 void ctk_sysinfo_add_help(GtkTextBuffer *b, GtkTextIter *i,
-                          gboolean have_vulkan, gboolean have_amd)
+                          gboolean have_vulkan, gboolean have_gl,
+                          gboolean have_amd)
 {
     if (have_vulkan) {
         ctk_help_heading(b, i, "Vulkan Loader Version");
@@ -503,6 +830,15 @@ void ctk_sysinfo_add_help(GtkTextBuffer *b, GtkTextIter *i,
                       "GPU_N to match the GPU pages.  If nvidia-settings is "
                       "started with __VK_LAYER_NV_optimus=NVIDIA_only, only "
                       "the NVIDIA GPU is listed.");
+    }
+    if (have_gl) {
+        ctk_help_heading(b, i, "OpenGL Devices");
+        ctk_help_para(b, i, "The OpenGL renderer, version and GLSL version "
+                      "of each GPU.  Each GPU is queried directly through "
+                      "the EGL device platform, so this includes the PRIME "
+                      "render offload GPU, which applications only use when "
+                      "they are offloaded to it.  The version is that of a "
+                      "default (compatibility profile) context.");
     }
     if (have_amd) {
         ctk_help_heading(b, i, "Kernel Driver");

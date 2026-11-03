@@ -562,9 +562,11 @@ GtkWidget* ctk_server_new(CtrlTarget *ctrl_target,
     }
 
 
-    /* Vulkan devices, and AMD driver information when amdgpu is loaded */
+    /* Vulkan and OpenGL devices, and AMD driver information when amdgpu
+     * is loaded */
 
     ctk_sysinfo_add_sections(vbox, &ctk_object->vulkan_available,
+                             &ctk_object->opengl_available,
                              &ctk_object->amd_available);
 
 
@@ -681,6 +683,7 @@ GtkTextBuffer *ctk_server_create_help(GtkTextTagTable *table,
     }
 
     ctk_sysinfo_add_help(b, &i, ctk_object->vulkan_available,
+                         ctk_object->opengl_available,
                          ctk_object->amd_available);
 
     if (ctk_object->wayland_available) {
