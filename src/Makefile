@@ -219,8 +219,11 @@ endif
 # for "--as-needed" linker behavior).
 LIBS += -lX11 -lXext -lm $(LIBDL_LIBS)
 
-GTK2_LIBS += $(GTK2_LDFLAGS)
-GTK3_LIBS += $(GTK3_LDFLAGS)
+# The AMD/Radeon display pages use XRandR directly.
+XRANDR_LDFLAGS ?= $(shell $(PKG_CONFIG) --libs xrandr 2>/dev/null || echo -lXrandr)
+
+GTK2_LIBS += $(GTK2_LDFLAGS) $(XRANDR_LDFLAGS)
+GTK3_LIBS += $(GTK3_LDFLAGS) $(XRANDR_LDFLAGS)
 WAYLAND_LIBS += $(WAYLAND_LDFLAGS)
 
 # Include all the source lists; dist-files.mk will define NVIDIA_SETTINGS_SRC

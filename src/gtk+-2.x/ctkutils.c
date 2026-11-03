@@ -961,3 +961,39 @@ GdkPixbuf *ctk_pixbuf_from_data(const char *start, const char *end)
 #endif
     return pixbuf;
 }
+
+
+static void section_heading(GtkWidget *vbox, const gchar *title)
+{
+    GtkWidget *hbox = gtk_hbox_new(FALSE, 0);
+    GtkWidget *label = gtk_label_new(title);
+    GtkWidget *hsep = gtk_hseparator_new();
+
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), hsep, TRUE, TRUE, 5);
+}
+
+
+GtkWidget *ctk_section_table_new(GtkWidget *vbox, const gchar *title)
+{
+    GtkWidget *table = gtk_table_new(1, 2, FALSE);
+
+    section_heading(vbox, title);
+    gtk_table_set_row_spacings(GTK_TABLE(table), 3);
+    gtk_table_set_col_spacings(GTK_TABLE(table), 15);
+    gtk_container_set_border_width(GTK_CONTAINER(table), 5);
+    gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
+    return table;
+}
+
+
+GtkWidget *ctk_section_box_new(GtkWidget *vbox, const gchar *title)
+{
+    GtkWidget *box = gtk_vbox_new(FALSE, 5);
+
+    section_heading(vbox, title);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 5);
+    gtk_box_pack_start(GTK_BOX(vbox), box, FALSE, FALSE, 0);
+    return box;
+}
