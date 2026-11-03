@@ -222,8 +222,18 @@ LIBS += -lX11 -lXext -lm $(LIBDL_LIBS)
 # The AMD/Radeon display pages use XRandR directly.
 XRANDR_LDFLAGS ?= $(shell $(PKG_CONFIG) --libs xrandr 2>/dev/null || echo -lXrandr)
 
-GTK2_LIBS += $(GTK2_LDFLAGS) $(XRANDR_LDFLAGS)
-GTK3_LIBS += $(GTK3_LDFLAGS) $(XRANDR_LDFLAGS)
+# On Wayland the display pages read the kernel's KMS state through libdrm.
+# It is optional; without it they are only available on X11.
+ifndef LIBDRM_AVAILABLE
+  LIBDRM_AVAILABLE := $(shell $(PKG_CONFIG) --exists libdrm && echo 1)
+endif
+ifeq (1,$(LIBDRM_AVAILABLE))
+  LIBDRM_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libdrm) -DHAVE_LIBDRM
+  LIBDRM_LDFLAGS ?= $(shell $(PKG_CONFIG) --libs libdrm)
+endif
+
+GTK2_LIBS += $(GTK2_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS)
+GTK3_LIBS += $(GTK3_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS)
 WAYLAND_LIBS += $(WAYLAND_LDFLAGS)
 
 # Include all the source lists; dist-files.mk will define NVIDIA_SETTINGS_SRC
@@ -270,12 +280,12 @@ $(call BUILD_OBJECT_LIST,$(XCP_SRC)): CFLAGS += -fPIC
 
 ifdef BUILD_GTK2LIB
   $(call BUILD_OBJECT_LIST_WITH_DIR,$(GTK_SRC),$(GTK2LIB_DIR)): \
-      CFLAGS += $(GTK2_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
+      CFLAGS += $(GTK2_CFLAGS) $(LIBDRM_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
 endif
 
 ifdef BUILD_GTK3LIB
   $(call BUILD_OBJECT_LIST_WITH_DIR,$(GTK_SRC),$(GTK3LIB_DIR)): \
-      CFLAGS += $(GTK3_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
+      CFLAGS += $(GTK3_CFLAGS) $(LIBDRM_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
 endif
 
 ifdef BUILD_WAYLANDLIB

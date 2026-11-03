@@ -93,6 +93,8 @@ struct _CtkPrime
     gboolean rprime_enabled;
     gboolean rprime_active;      /* an NVIDIA output is lit */
     gchar *nv_provider_label;    /* GPU label of nv_provider */
+
+    gchar *wl_state;             /* Wayland: connector state last shown */
 };
 
 struct _CtkPrimeClass
