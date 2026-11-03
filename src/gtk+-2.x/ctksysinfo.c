@@ -567,7 +567,12 @@ static gboolean probe_opengl(GList **devices)
                     gpu = NULL;
                     d->renderer = g_strdup((const char *) r);
                     d->version = g_strdup((const char *) v);
-                    d->glsl = g ? g_strdup((const char *) g) : NULL;
+                    /* Keep only the version number: NVIDIA reports
+                     * "4.60 NVIDIA", repeating the vendor that is
+                     * already part of GL_VERSION. */
+                    d->glsl = g ? g_strndup((const char *) g,
+                                            strcspn((const char *) g, " "))
+                                : NULL;
                     *devices = g_list_append(*devices, d);
                 }
                 make_current(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
