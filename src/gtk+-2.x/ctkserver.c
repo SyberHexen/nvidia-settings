@@ -27,6 +27,7 @@
 
 #include "ctkbanner.h"
 
+#include "ctksysinfo.h"
 #include "ctkserver.h"
 #include "ctkevent.h"
 #include "ctkhelp.h"
@@ -561,6 +562,12 @@ GtkWidget* ctk_server_new(CtrlTarget *ctrl_target,
     }
 
 
+    /* Vulkan devices, and AMD driver information when amdgpu is loaded */
+
+    ctk_sysinfo_add_sections(vbox, &ctk_object->vulkan_available,
+                             &ctk_object->amd_available);
+
+
     /* print special trademark text for FreeBSD */
     
     if (os_val == NV_CTRL_OPERATING_SYSTEM_FREEBSD) {
@@ -672,6 +679,9 @@ GtkTextBuffer *ctk_server_create_help(GtkTextTagTable *table,
         ctk_help_para(b, &i, "This is the number of X Screens on the "
                       "display.  (When Xinerama is enabled this is always 1).");
     }
+
+    ctk_sysinfo_add_help(b, &i, ctk_object->vulkan_available,
+                         ctk_object->amd_available);
 
     if (ctk_object->wayland_available) {
 

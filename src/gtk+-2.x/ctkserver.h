@@ -56,6 +56,8 @@ typedef struct _CtkServer
     gboolean nvml_available;
     gboolean x_available;
     gboolean wayland_available;
+    gboolean vulkan_available;
+    gboolean amd_available;
 
 } CtkServer;
 
