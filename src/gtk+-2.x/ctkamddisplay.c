@@ -1188,7 +1188,8 @@ static void page_destroyed(GObject *obj, gpointer data)
     page->resolutions = page->rate_modes = NULL;
     g_free(page->output_name);
     g_free(page->title);
-    page->output_name = page->title = NULL;
+    g_free(page->gpu_label);
+    page->output_name = page->title = page->gpu_label = NULL;
 }
 
 
@@ -1504,7 +1505,7 @@ void ctk_amd_display_refresh(CtkAmdDisplay *page)
 /* ---- construction ------------------------------------------------------- */
 
 GtkWidget *ctk_amd_display_new(Display *dpy, RROutput output, AmdGpu *gpu,
-                               CtkConfig *ctk_config)
+                               const gchar *gpu_label, CtkConfig *ctk_config)
 {
     GObject *object;
     CtkAmdDisplay *page;
@@ -1532,7 +1533,9 @@ GtkWidget *ctk_amd_display_new(Display *dpy, RROutput output, AmdGpu *gpu,
     page->output = output;
     page->output_name = g_strndup(oi->name, oi->nameLen);
     page->gpu = gpu;
-    page->connector = find_connector(dpy, output, gpu);
+    page->gpu_label = g_strdup(gpu_label ? gpu_label :
+                               gpu ? gpu->product_name : NULL);
+    page->connector = gpu ? find_connector(dpy, output, gpu) : NULL;
     page->resolutions = g_array_new(FALSE, FALSE, sizeof(CtkAmdResolution));
     page->rate_modes = g_array_new(FALSE, FALSE, sizeof(RRMode));
 
@@ -1577,7 +1580,7 @@ GtkWidget *ctk_amd_display_new(Display *dpy, RROutput output, AmdGpu *gpu,
         info_row(page, table, &row, "DRM Connector:", s, NULL);
         g_free(s);
     }
-    info_row(page, table, &row, "GPU:", gpu->product_name, NULL);
+    info_row(page, table, &row, "GPU:", page->gpu_label, NULL);
     if (oi->mm_width && oi->mm_height) {
         double diag = sqrt((double) oi->mm_width * oi->mm_width +
                            (double) oi->mm_height * oi->mm_height) / 25.4;
@@ -1730,13 +1733,26 @@ GtkTextBuffer *ctk_amd_display_create_help(GtkTextTagTable *table,
     gtk_text_buffer_get_iter_at_offset(b, &i, 0);
 
     ctk_help_title(b, &i, "%s Help", page->title);
-    ctk_help_para(b, &i, "This page controls a display connected to an AMD "
-                  "Radeon GPU.  Such displays are not managed by the NVIDIA "
-                  "X driver, so nvidia-settings configures them through the "
-                  "standard XRandR extension.  Changes made here are not "
-                  "saved to xorg.conf; use your desktop environment's "
-                  "display settings or an xorg.conf Monitor section to make "
-                  "them permanent.");
+    if (page->gpu) {
+        ctk_help_para(b, &i, "This page controls a display connected to an "
+                      "AMD Radeon GPU.  Such displays are not managed by the "
+                      "NVIDIA X driver, so nvidia-settings configures them "
+                      "through the standard XRandR extension.  Changes made "
+                      "here are not saved to xorg.conf; use your desktop "
+                      "environment's display settings or an xorg.conf "
+                      "Monitor section to make them permanent.");
+    } else {
+        ctk_help_para(b, &i, "This page controls a display connected to the "
+                      "NVIDIA GPU while another GPU drives the X screen.  "
+                      "The NVIDIA GPU scans out an image rendered by the "
+                      "display GPU (\"reverse PRIME\"), which requires the "
+                      "NVIDIA RandR provider to use the display GPU as its "
+                      "output source; see the PRIME page.  Such displays are "
+                      "configured through the standard XRandR extension.  "
+                      "Changes made here are not saved to xorg.conf; use your "
+                      "desktop environment's display settings to make them "
+                      "permanent.");
+    }
 
     ctk_help_heading(b, &i, "Display");
     ctk_help_para(b, &i, "%s", __enable_help);

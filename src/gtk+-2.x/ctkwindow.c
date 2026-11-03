@@ -75,6 +75,7 @@
 #include "amdgpu-sysfs.h"
 #include "ctkamdgpu.h"
 #include "ctkamddisplay.h"
+#include "ctkprime.h"
 
 /* column enumeration */
 
@@ -138,7 +139,8 @@ static void update_display_devices(GtkWidget *object, CtrlEvent *event,
 
 
 static void add_amd_gpu_pages(CtkWindow *ctk_window,
-                              GtkTextTagTable *tag_table);
+                              GtkTextTagTable *tag_table,
+                              CtrlSystem *system);
 
 static GObjectClass *parent_class;
 
@@ -948,7 +950,7 @@ GtkWidget *ctk_window_new(ParsedAttribute *p, ConfigProperties *conf,
 
     /* AMD/Radeon GPUs (amdgpu kernel driver) and their displays */
 
-    add_amd_gpu_pages(ctk_window, tag_table);
+    add_amd_gpu_pages(ctk_window, tag_table, system);
 
     /*
      * add the frame lock page, if any of the X screens support
@@ -1647,7 +1649,8 @@ static void update_display_devices(GtkWidget *object,
  */
 
 typedef struct {
-    AmdGpu *gpu;
+    AmdGpu *gpu;             /* NULL for the NVIDIA GPU screen outputs */
+    gchar *gpu_label;        /* GPU name shown on the display pages */
     GtkTreeIter iter;
     GArray *display_iters;   /* GtkTreeIter */
     GList *outputs;          /* RROutput as pointers */
@@ -1659,7 +1662,18 @@ typedef struct {
     Display *dpy;
     guint num_gpus;
     GList *entries;          /* AmdGpuEntry* */
+    GtkWidget *prime;        /* PRIME page, or NULL */
 } AmdPagesData;
+
+
+static GList *entry_find_outputs(AmdPagesData *data, AmdGpuEntry *entry)
+{
+    if (entry->gpu) {
+        return ctk_amd_display_find_outputs(data->dpy, entry->gpu,
+                                            data->num_gpus);
+    }
+    return ctk_prime_find_nvidia_outputs(data->dpy);
+}
 
 
 static void add_amd_display_pages(AmdPagesData *data, AmdGpuEntry *entry)
@@ -1672,6 +1686,7 @@ static void add_amd_display_pages(AmdPagesData *data, AmdGpuEntry *entry)
         GtkTreeIter child;
 
         widget = ctk_amd_display_new(data->dpy, output, entry->gpu,
+                                     entry->gpu_label,
                                      data->window->ctk_config);
         if (!widget) {
             continue;
@@ -1706,10 +1721,13 @@ static gboolean amd_randr_changed(gpointer user_data)
         gtk_tree_view_get_selection(ctk_window->treeview);
     GList *l;
 
+    if (data->prime) {
+        ctk_prime_refresh(CTK_PRIME(data->prime));
+    }
+
     for (l = data->entries; l; l = l->next) {
         AmdGpuEntry *entry = l->data;
-        GList *outputs = ctk_amd_display_find_outputs(data->dpy, entry->gpu,
-                                                      data->num_gpus);
+        GList *outputs = entry_find_outputs(data, entry);
         GtkWidget *widget;
         guint i;
 
@@ -1787,15 +1805,13 @@ static gboolean amd_randr_changed(gpointer user_data)
 
 
 static void add_amd_gpu_pages(CtkWindow *ctk_window,
-                              GtkTextTagTable *tag_table)
+                              GtkTextTagTable *tag_table,
+                              CtrlSystem *system)
 {
     GList *gpus = amdgpu_enumerate();
-    GList *l;
+    GList *l, *nv_gpus = NULL, *card_names = NULL;
+    CtrlTargetNode *node;
     AmdPagesData *data;
-
-    if (!gpus) {
-        return;
-    }
 
     data = g_new0(AmdPagesData, 1);
     data->window = ctk_window;
@@ -1806,32 +1822,38 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
     for (l = gpus; l; l = l->next) {
         AmdGpu *gpu = l->data;
         AmdGpuEntry *entry = g_new0(AmdGpuEntry, 1);
+        CtkPrimeCardName *name;
         GtkWidget *widget;
         gchar *label;
-
-        widget = ctk_amd_gpu_new(gpu, ctk_window->ctk_config);
-        if (!widget) {
-            g_free(entry);
-            continue;
-        }
-
-        entry->gpu = gpu;
-        entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
 
         {
             gchar *name = drm_gpu_name(gpu->card_name);
             label = g_strdup_printf("%s - (%s)", name, gpu->product_name);
             g_free(name);
         }
+        name = g_new0(CtkPrimeCardName, 1);
+        name->card = g_strdup(gpu->card_name);
+        name->label = g_strdup(label);
+        card_names = g_list_append(card_names, name);
+
+        widget = ctk_amd_gpu_new(gpu, ctk_window->ctk_config);
+        if (!widget) {
+            g_free(label);
+            g_free(entry);
+            continue;
+        }
+
+        entry->gpu = gpu;
+        entry->gpu_label = label;
+        entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
+
         add_page(widget, ctk_amd_gpu_create_help(tag_table,
                                                  CTK_AMD_GPU(widget)),
                  ctk_window, NULL, &entry->iter, label, NULL,
                  ctk_amd_gpu_start_timer, ctk_amd_gpu_stop_timer);
-        g_free(label);
 
         if (data->dpy) {
-            entry->outputs = ctk_amd_display_find_outputs(data->dpy, gpu,
-                                                          data->num_gpus);
+            entry->outputs = entry_find_outputs(data, entry);
             add_amd_display_pages(data, entry);
         }
 
@@ -1842,10 +1864,54 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
      * the window; only free the list links. */
     g_list_free(gpus);
 
-    if (data->dpy && data->entries) {
+    /*
+     * PRIME page: render offload status, applications on the NVIDIA GPU, an
+     * offload launcher, and (reverse PRIME) displays on the NVIDIA GPU.
+     */
+    for (node = system->targets[GPU_TARGET]; node; node = node->next) {
+        CtrlTarget *gpu_target = node->t;
+        CtkPrimeGpu *g;
+
+        if (gpu_target == NULL || gpu_target->h == NULL) {
+            continue;
+        }
+        g = g_new0(CtkPrimeGpu, 1);
+        g->pci_slot = ctk_gpu_pci_slot(gpu_target);
+        g->card = drm_card_for_pci_slot(g->pci_slot);
+        g->label = create_gpu_name_string(gpu_target);
+        nv_gpus = g_list_append(nv_gpus, g);
+    }
+
+    data->prime = ctk_prime_new(data->dpy, nv_gpus, card_names,
+                                system->targets[X_SCREEN_TARGET] != NULL,
+                                ctk_window->ctk_config);
+    if (data->prime) {
+        AmdGpuEntry *entry = g_new0(AmdGpuEntry, 1);
+
+        entry->gpu_label =
+            g_strdup(ctk_prime_nvidia_gpu_label(CTK_PRIME(data->prime)));
+        entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
+        add_page(data->prime,
+                 ctk_prime_create_help(tag_table, CTK_PRIME(data->prime)),
+                 ctk_window, NULL, &entry->iter, "PRIME Render Offload", NULL,
+                 ctk_prime_start_timer, ctk_prime_stop_timer);
+        if (data->dpy) {
+            entry->outputs = entry_find_outputs(data, entry);
+            add_amd_display_pages(data, entry);
+        }
+        data->entries = g_list_append(data->entries, entry);
+    }
+
+    if (!data->entries) {
+        g_free(data);
+        return;
+    }
+
+    if (data->dpy) {
         ctk_amd_display_watch_randr(data->dpy, amd_randr_changed, data);
-    } else if (!data->dpy) {
-        nv_info_msg(NULL, "AMD display pages are unavailable: the GUI is not "
-                    "running on an X11 display with XRandR 1.3 or newer.");
+    } else {
+        nv_info_msg(NULL, "AMD and PRIME display pages are unavailable: the "
+                    "GUI is not running on an X11 display with XRandR 1.3 "
+                    "or newer.");
     }
 }
