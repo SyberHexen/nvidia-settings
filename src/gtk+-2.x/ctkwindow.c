@@ -72,6 +72,10 @@
 
 #include "ctkpowermode.h"
 
+#include "amdgpu-sysfs.h"
+#include "ctkamdgpu.h"
+#include "ctkamddisplay.h"
+
 /* column enumeration */
 
 enum {
@@ -132,6 +136,9 @@ static void add_display_devices(CtkWindow *ctk_window, GtkTreeIter *iter,
 static void update_display_devices(GtkWidget *object, CtrlEvent *event,
                                    gpointer user_data);
 
+
+static void add_amd_gpu_pages(CtkWindow *ctk_window,
+                              GtkTextTagTable *tag_table);
 
 static GObjectClass *parent_class;
 
@@ -939,6 +946,10 @@ GtkWidget *ctk_window_new(ParsedAttribute *p, ConfigProperties *conf,
                             data, ctk_window->attribute_list);
     }
 
+    /* AMD/Radeon GPUs (amdgpu kernel driver) and their displays */
+
+    add_amd_gpu_pages(ctk_window, tag_table);
+
     /*
      * add the frame lock page, if any of the X screens support
      * frame lock
@@ -1622,3 +1633,216 @@ static void update_display_devices(GtkWidget *object,
     }
 
 } /* update_display_devices() */
+
+
+
+/*
+ * AMD/Radeon support
+ *
+ * GPUs driven by the amdgpu kernel driver are discovered through sysfs and
+ * get a top level "AMD GPU" page.  Displays connected to them are found
+ * through XRandR and get a child page each.  The display pages are rebuilt
+ * when the set of connected outputs changes, and refreshed in place when
+ * only the configuration changes.
+ */
+
+typedef struct {
+    AmdGpu *gpu;
+    GtkTreeIter iter;
+    GArray *display_iters;   /* GtkTreeIter */
+    GList *outputs;          /* RROutput as pointers */
+} AmdGpuEntry;
+
+typedef struct {
+    CtkWindow *window;
+    GtkTextTagTable *tag_table;
+    Display *dpy;
+    guint num_gpus;
+    GList *entries;          /* AmdGpuEntry* */
+} AmdPagesData;
+
+
+static void add_amd_display_pages(AmdPagesData *data, AmdGpuEntry *entry)
+{
+    GList *l;
+
+    for (l = entry->outputs; l; l = l->next) {
+        XID output = (XID) GPOINTER_TO_UINT(l->data);
+        GtkWidget *widget;
+        GtkTreeIter child;
+
+        widget = ctk_amd_display_new(data->dpy, output, entry->gpu,
+                                     data->window->ctk_config);
+        if (!widget) {
+            continue;
+        }
+        add_page(widget,
+                 ctk_amd_display_create_help(data->tag_table,
+                                             CTK_AMD_DISPLAY(widget)),
+                 data->window, &entry->iter, &child,
+                 CTK_AMD_DISPLAY(widget)->title, NULL, NULL, NULL);
+        g_array_append_val(entry->display_iters, child);
+    }
+}
+
+
+static gboolean same_outputs(GList *a, GList *b)
+{
+    for (; a && b; a = a->next, b = b->next) {
+        if (a->data != b->data) {
+            return FALSE;
+        }
+    }
+    return a == NULL && b == NULL;
+}
+
+
+static gboolean amd_randr_changed(gpointer user_data)
+{
+    AmdPagesData *data = user_data;
+    CtkWindow *ctk_window = data->window;
+    GtkTreeModel *model = GTK_TREE_MODEL(ctk_window->tree_store);
+    GtkTreeSelection *selection =
+        gtk_tree_view_get_selection(ctk_window->treeview);
+    GList *l;
+
+    for (l = data->entries; l; l = l->next) {
+        AmdGpuEntry *entry = l->data;
+        GList *outputs = ctk_amd_display_find_outputs(data->dpy, entry->gpu,
+                                                      data->num_gpus);
+        GtkWidget *widget;
+        guint i;
+
+        if (same_outputs(outputs, entry->outputs)) {
+            /* Same displays; just pick up configuration changes */
+            g_list_free(outputs);
+            for (i = 0; i < entry->display_iters->len; i++) {
+                gtk_tree_model_get(model,
+                                   &g_array_index(entry->display_iters,
+                                                  GtkTreeIter, i),
+                                   CTK_WINDOW_WIDGET_COLUMN, &widget, -1);
+                if (widget) {
+                    ctk_amd_display_refresh(CTK_AMD_DISPLAY(widget));
+                }
+            }
+            continue;
+        }
+
+        /* Hotplug: rebuild this GPU's display pages */
+        {
+            GtkTreePath *path = gtk_tree_model_get_path(model, &entry->iter);
+            gboolean expanded =
+                gtk_tree_view_row_expanded(ctk_window->treeview, path);
+            XID selected_output = None;
+
+            for (i = entry->display_iters->len; i > 0; i--) {
+                GtkTreeIter *it = &g_array_index(entry->display_iters,
+                                                 GtkTreeIter, i - 1);
+                gtk_tree_model_get(model, it, CTK_WINDOW_WIDGET_COLUMN,
+                                   &widget, -1);
+                if (gtk_tree_selection_iter_is_selected(selection, it)) {
+                    if (widget) {
+                        selected_output = CTK_AMD_DISPLAY(widget)->output;
+                    }
+                    gtk_tree_selection_select_iter(selection, &entry->iter);
+                }
+                gtk_tree_store_remove(ctk_window->tree_store, it);
+                if (widget) {
+                    /* add_page() leaves us holding two references (the
+                     * initial one, sunk, plus an explicit ref); the tree
+                     * store only keeps a raw pointer. */
+                    g_object_unref(G_OBJECT(widget));
+                    g_object_unref(G_OBJECT(widget));
+                }
+            }
+            g_array_set_size(entry->display_iters, 0);
+
+            g_list_free(entry->outputs);
+            entry->outputs = outputs;
+            add_amd_display_pages(data, entry);
+
+            if (expanded) {
+                gtk_tree_view_expand_row(ctk_window->treeview, path, TRUE);
+            }
+            gtk_tree_path_free(path);
+
+            if (selected_output != None) {
+                for (i = 0; i < entry->display_iters->len; i++) {
+                    GtkTreeIter *it = &g_array_index(entry->display_iters,
+                                                     GtkTreeIter, i);
+                    gtk_tree_model_get(model, it, CTK_WINDOW_WIDGET_COLUMN,
+                                       &widget, -1);
+                    if (widget &&
+                        CTK_AMD_DISPLAY(widget)->output == selected_output) {
+                        gtk_tree_selection_select_iter(selection, it);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+
+static void add_amd_gpu_pages(CtkWindow *ctk_window,
+                              GtkTextTagTable *tag_table)
+{
+    GList *gpus = amdgpu_enumerate();
+    GList *l;
+    AmdPagesData *data;
+
+    if (!gpus) {
+        return;
+    }
+
+    data = g_new0(AmdPagesData, 1);
+    data->window = ctk_window;
+    data->tag_table = tag_table;
+    data->dpy = ctk_amd_display_get_xdisplay();
+    data->num_gpus = g_list_length(gpus);
+
+    for (l = gpus; l; l = l->next) {
+        AmdGpu *gpu = l->data;
+        AmdGpuEntry *entry = g_new0(AmdGpuEntry, 1);
+        GtkWidget *widget;
+        gchar *label;
+
+        widget = ctk_amd_gpu_new(gpu, ctk_window->ctk_config);
+        if (!widget) {
+            g_free(entry);
+            continue;
+        }
+
+        entry->gpu = gpu;
+        entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
+
+        label = g_strdup_printf("AMD GPU %d - (%s)", gpu->index,
+                                gpu->product_name);
+        add_page(widget, ctk_amd_gpu_create_help(tag_table,
+                                                 CTK_AMD_GPU(widget)),
+                 ctk_window, NULL, &entry->iter, label, NULL,
+                 ctk_amd_gpu_start_timer, ctk_amd_gpu_stop_timer);
+        g_free(label);
+
+        if (data->dpy) {
+            entry->outputs = ctk_amd_display_find_outputs(data->dpy, gpu,
+                                                          data->num_gpus);
+            add_amd_display_pages(data, entry);
+        }
+
+        data->entries = g_list_append(data->entries, entry);
+    }
+
+    /* The AmdGpu structures are referenced by the pages for the lifetime of
+     * the window; only free the list links. */
+    g_list_free(gpus);
+
+    if (data->dpy && data->entries) {
+        ctk_amd_display_watch_randr(data->dpy, amd_randr_changed, data);
+    } else if (!data->dpy) {
+        nv_info_msg(NULL, "AMD display pages are unavailable: the GUI is not "
+                    "running on an X11 display with XRandR 1.3 or newer.");
+    }
+}
