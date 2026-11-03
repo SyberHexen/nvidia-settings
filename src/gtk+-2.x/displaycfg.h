@@ -121,6 +121,160 @@ gboolean       dc_open_desktop_display_settings(GError **error);
 /* Name of the desktop's display settings tool, or NULL if unknown. */
 const gchar   *dc_desktop_display_settings_name(void);
 
+
+/* ---- display configuration backends ------------------------------------ */
+
+/*
+ * Wayland has no common protocol for changing display settings, so each
+ * compositor family gets a backend:
+ *
+ *   GNOME (Mutter) and Cinnamon (Muffin)  DisplayConfig D-Bus interface
+ *   KDE Plasma (KWin)                     kde_output_management_v2
+ *   wlroots compositors and others        zwlr_output_manager_v1
+ */
+
+typedef enum {
+    DC_TRANSFORM_NORMAL = 0,
+    DC_TRANSFORM_90,
+    DC_TRANSFORM_180,
+    DC_TRANSFORM_270,
+    DC_TRANSFORM_FLIPPED,
+    DC_TRANSFORM_FLIPPED_90,
+    DC_TRANSFORM_FLIPPED_180,
+    DC_TRANSFORM_FLIPPED_270,
+} DcTransform;
+
+typedef enum {
+    DC_VRR_UNSUPPORTED = -1,
+    DC_VRR_NEVER = 0,
+    DC_VRR_ALWAYS = 1,
+    DC_VRR_AUTOMATIC = 2,     /* KDE: only for fullscreen applications */
+} DcVrr;
+
+typedef struct _DcOutputMode {
+    gchar   *id;              /* backend identifier */
+    guint    width;
+    guint    height;
+    gdouble  refresh;         /* Hz */
+    gboolean preferred;
+    gboolean interlaced;
+    gboolean variable;        /* Mutter: variable refresh rate twin */
+    GArray  *scales;          /* gdouble; NULL if any scale is allowed */
+    gpointer handle;          /* backend object (wayland mode proxy) */
+    guint    handle_id;       /* tells reused proxy addresses apart */
+} DcOutputMode;
+
+typedef struct _DcOutput {
+    gchar   *name;            /* compositor's connector name ("DP-1") */
+    gchar   *make;
+    gchar   *model;
+    gchar   *serial;
+    gchar   *description;
+
+    gboolean enabled;
+    gint     x, y;
+    gdouble  scale;
+    DcTransform transform;
+    gboolean primary;
+    DcVrr    vrr;             /* current policy, or DC_VRR_UNSUPPORTED */
+    guint    vrr_policies;    /* bit mask of (1 << DcVrr) allowed */
+
+    GArray  *modes;           /* DcOutputMode */
+    gint     current_mode;    /* index into modes, -1 if none */
+
+    gpointer handle;          /* backend object (wayland head proxy) */
+    guint    handle_id;       /* tells reused proxy addresses apart */
+} DcOutput;
+
+enum {
+    DC_CAP_PRIMARY         = 1 << 0,   /* outputs can be made primary */
+    DC_CAP_ANY_SCALE       = 1 << 1,   /* scales are not restricted */
+    DC_CAP_PERSIST         = 1 << 2,   /* changes can be saved by us */
+    DC_CAP_DISABLE         = 1 << 3,   /* outputs can be turned off */
+    DC_CAP_GLOBAL_SCALE    = 1 << 4,   /* all outputs share one scale */
+    DC_CAP_LOGICAL_LAYOUT  = 1 << 5,   /* positions are in scaled units */
+    DC_CAP_SAVED_BY_COMPOSITOR = 1 << 6, /* compositor saves on its own */
+    DC_CAP_COMPOSITOR_CONFIRMS = 1 << 7, /* persistent changes are confirmed
+                                          * (and reverted) by the desktop */
+};
+
+typedef struct _DcBackend DcBackend;
+
+struct _DcBackend {
+    const gchar *name;        /* "Mutter DisplayConfig" */
+    guint caps;
+
+    /* A fresh snapshot of every output (DcOutput*), or NULL with 'error'. */
+    GList   *(*query)(DcBackend *b, GError **error);
+
+    /* Apply a full configuration.  'persistent' asks the compositor to
+     * remember it (only meaningful with DC_CAP_PERSIST). */
+    gboolean (*apply)(DcBackend *b, GList *outputs, gboolean persistent,
+                      GError **error);
+
+    GList   *watches;         /* internal: change callbacks */
+    guint    notify_id;       /* internal: debounce source */
+    GList   *cache;           /* internal: snapshot for dc_backend_outputs */
+    gboolean cache_valid;
+
+    gpointer priv;
+};
+
+/* The backend for the running compositor, or NULL (X11, or a compositor
+ * without a supported configuration interface).  Cached. */
+DcBackend     *dc_backend(void);
+
+/* A copy of the current outputs, shared between callers until the
+ * configuration changes; NULL with 'error' on failure. */
+GList         *dc_backend_outputs(DcBackend *b, GError **error);
+
+/* Apply a configuration (see DcBackend.apply) */
+gboolean       dc_backend_apply(DcBackend *b, GList *outputs,
+                                gboolean persistent, GError **error);
+
+/* Register a callback for configuration changes; several may be added. */
+void           dc_backend_add_watch(DcBackend *b, GSourceFunc func,
+                                    gpointer data);
+void           dc_backend_remove_watch(DcBackend *b, GSourceFunc func,
+                                       gpointer data);
+
+/* Backend constructors; each returns NULL if its interface is absent. */
+DcBackend     *dc_backend_mutter_new(const gchar *bus_name,
+                                     const gchar *object_path,
+                                     const gchar *interface);
+DcBackend     *dc_backend_kde_new(void);
+DcBackend     *dc_backend_wlr_new(void);
+
+/* Internal: notify watchers, debounced. */
+void           dc_backend_notify_changed(DcBackend *b);
+
+DcOutput      *dc_output_copy(const DcOutput *o);
+void           dc_output_free(gpointer o);
+void           dc_output_list_free(GList *list);
+GList         *dc_output_list_copy(GList *list);
+
+/* Size the output occupies in the layout (scaled and rotated as the
+ * backend requires); 0x0 if it is disabled. */
+void           dc_output_extent(const DcBackend *b, const DcOutput *o,
+                                gint *w, gint *h);
+
+/* The output in 'outputs' showing connector 'c', or NULL. */
+DcOutput      *dc_output_for_connector(GList *outputs, const DcConnector *c,
+                                       gboolean unique_name);
+
+/*
+ * Keep the layout free of gaps after 'changed' was edited ('before' is its
+ * previous state).  Outputs to the right of / below its old area move by
+ * the change in its size, which also closes the hole a disabled output
+ * leaves.  An output that is turned on without being 'moved' is placed to
+ * the right of the others.  Finally the layout is moved to start at 0,0.
+ */
+void           dc_layout_fixup(const DcBackend *b, GList *outputs,
+                               DcOutput *changed, const DcOutput *before,
+                               gboolean moved);
+
+const gchar   *dc_transform_name(DcTransform t);
+
 G_END_DECLS
 
 #endif /* __DISPLAYCFG_H__ */

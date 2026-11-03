@@ -59,6 +59,33 @@ struct _CtkWlDisplay
     GtkWidget *hdr_label;
     GtkListStore *mode_store;
     gchar *modes_sig;            /* detects mode list changes */
+
+    /* configuration through the compositor (NULL backend: read-only) */
+    DcBackend *backend;
+    DcConnector *kms_info;       /* EDID identity, to find our output */
+    gboolean unique_name;        /* no other GPU has this connector name */
+    DcOutput *output;            /* last state read from the compositor */
+    gboolean updating;
+
+    GtkWidget *config_table;
+    GtkWidget *config_status;
+    GtkWidget *enable_check;
+    GtkWidget *resolution_combo;
+    GtkWidget *rate_combo;
+    GtkWidget *scale_combo;
+    GtkWidget *rotation_combo;
+    GtkWidget *pos_x_spin;
+    GtkWidget *pos_y_spin;
+    GtkWidget *primary_check;
+    GtkWidget *vrr_combo;
+    GtkWidget *vrr_unsupported;
+    GtkWidget *apply_button;
+    GtkWidget *reset_button;
+
+    GArray *resolutions;         /* DcMode: width, height, interlaced */
+    GArray *rates;               /* gdouble, per rate combo row */
+    GArray *scales;              /* gdouble, per scale combo row */
+    GArray *vrr_values;          /* gint (DcVrr), per VRR combo row */
 };
 
 struct _CtkWlDisplayClass
