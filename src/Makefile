@@ -232,8 +232,18 @@ ifeq (1,$(LIBDRM_AVAILABLE))
   LIBDRM_LDFLAGS ?= $(shell $(PKG_CONFIG) --libs libdrm)
 endif
 
-GTK2_LIBS += $(GTK2_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS)
-GTK3_LIBS += $(GTK3_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS)
+# Display configuration on KDE Plasma and wlroots compositors talks Wayland
+# protocols, generated with wayland-scanner.  Optional as well.
+ifeq (1,$(WAYLAND_AVAILABLE))
+  WAYLAND_SCANNER ?= $(shell $(PKG_CONFIG) --variable=wayland_scanner wayland-scanner 2>/dev/null)
+  ifneq (,$(WAYLAND_SCANNER))
+    WL_CLIENT_CFLAGS = $(WAYLAND_CFLAGS) -DHAVE_WAYLAND_CLIENT
+    WL_CLIENT_LDFLAGS = $(WAYLAND_LDFLAGS)
+  endif
+endif
+
+GTK2_LIBS += $(GTK2_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS) $(WL_CLIENT_LDFLAGS)
+GTK3_LIBS += $(GTK3_LDFLAGS) $(XRANDR_LDFLAGS) $(LIBDRM_LDFLAGS) $(WL_CLIENT_LDFLAGS)
 WAYLAND_LIBS += $(WAYLAND_LDFLAGS)
 
 # Include all the source lists; dist-files.mk will define NVIDIA_SETTINGS_SRC
@@ -280,12 +290,12 @@ $(call BUILD_OBJECT_LIST,$(XCP_SRC)): CFLAGS += -fPIC
 
 ifdef BUILD_GTK2LIB
   $(call BUILD_OBJECT_LIST_WITH_DIR,$(GTK_SRC),$(GTK2LIB_DIR)): \
-      CFLAGS += $(GTK2_CFLAGS) $(LIBDRM_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
+      CFLAGS += $(GTK2_CFLAGS) $(LIBDRM_CFLAGS) $(WL_CLIENT_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
 endif
 
 ifdef BUILD_GTK3LIB
   $(call BUILD_OBJECT_LIST_WITH_DIR,$(GTK_SRC),$(GTK3LIB_DIR)): \
-      CFLAGS += $(GTK3_CFLAGS) $(LIBDRM_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
+      CFLAGS += $(GTK3_CFLAGS) $(LIBDRM_CFLAGS) $(WL_CLIENT_CFLAGS) -fPIC -I $(XCONFIG_PARSER_DIR)/..
 endif
 
 ifdef BUILD_WAYLANDLIB
@@ -406,6 +416,27 @@ $(foreach png,$(IMAGE_FILES), \
 # Build $(IMAGE_HEADERS)
 $(foreach png,$(IMAGE_FILES), \
   $(eval $(call BINARY_DATA_HEADER_RULE,$(png))))
+# Build the Wayland protocol headers and interface code
+ifneq (,$(WL_CLIENT_CFLAGS))
+  WL_PROTOCOL_HEADERS = $(addprefix $(OUTPUTDIR)/,$(notdir $(WL_PROTOCOLS:.xml=-client-protocol.h)))
+  WL_PROTOCOL_CODE    = $(addprefix $(OUTPUTDIR)/,$(notdir $(WL_PROTOCOLS:.xml=-protocol.c)))
+
+  $(OUTPUTDIR)/%-client-protocol.h: protocols/%.xml
+	$(at_if_quiet)$(MKDIR) $(OUTPUTDIR)
+	$(call quiet_cmd_no_at,WAYLAND_SCANNER) client-header $< $@
+
+  $(OUTPUTDIR)/%-protocol.c: protocols/%.xml
+	$(at_if_quiet)$(MKDIR) $(OUTPUTDIR)
+	$(call quiet_cmd_no_at,WAYLAND_SCANNER) private-code $< $@
+
+  ifdef BUILD_GTK2LIB
+    $(GTK2_OBJS): $(WL_PROTOCOL_HEADERS) $(WL_PROTOCOL_CODE)
+  endif
+  ifdef BUILD_GTK3LIB
+    $(GTK3_OBJS): $(WL_PROTOCOL_HEADERS) $(WL_PROTOCOL_CODE)
+  endif
+endif
+
 ifdef BUILD_GTK2LIB
   $(GTK2_OBJS): $(IMAGE_HEADERS)
 endif

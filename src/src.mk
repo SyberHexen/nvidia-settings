@@ -181,6 +181,9 @@ GTK_SRC += gtk+-2.x/ctkamddisplay.c
 GTK_SRC += gtk+-2.x/ctkprime.c
 GTK_SRC += gtk+-2.x/displaycfg.c
 GTK_SRC += gtk+-2.x/ctkwldisplay.c
+GTK_SRC += gtk+-2.x/dcbackend.c
+GTK_SRC += gtk+-2.x/dcbackend-mutter.c
+GTK_SRC += gtk+-2.x/dcbackend-wl.c
 GTK_SRC += gtk+-2.x/ctksysinfo.c
 GTK_SRC += gtk+-2.x/ctkvdpau.c
 GTK_SRC += gtk+-2.x/ctkgridlicense.c
@@ -238,6 +241,12 @@ GTK_EXTRA_DIST += gtk+-2.x/ctkamddisplay.h
 GTK_EXTRA_DIST += gtk+-2.x/ctkprime.h
 GTK_EXTRA_DIST += gtk+-2.x/displaycfg.h
 GTK_EXTRA_DIST += gtk+-2.x/ctkwldisplay.h
+
+# Wayland output configuration protocols (KDE Plasma, wlroots)
+WL_PROTOCOLS += protocols/kde-output-device-v2.xml
+WL_PROTOCOLS += protocols/kde-output-management-v2.xml
+WL_PROTOCOLS += protocols/wlr-output-management-unstable-v1.xml
+GTK_EXTRA_DIST += $(WL_PROTOCOLS)
 GTK_EXTRA_DIST += gtk+-2.x/ctksysinfo.h
 GTK_EXTRA_DIST += gtk+-2.x/ctkvdpau.h
 GTK_EXTRA_DIST += gtk+-2.x/ctkgridlicense.h
