@@ -78,6 +78,8 @@
 #include "ctkamdpowermizer.h"
 #include "ctkamddisplay.h"
 #include "ctkprime.h"
+#include "displaycfg.h"
+#include "ctkwldisplay.h"
 
 /* column enumeration */
 
@@ -1656,12 +1658,17 @@ typedef struct {
     GtkTreeIter iter;
     GArray *display_iters;   /* GtkTreeIter */
     GList *outputs;          /* RROutput as pointers */
+    GList *cards;            /* Wayland: DRM cards searched ("card1") */
+    GList *wl_outputs;       /* Wayland: "card1-DP-1|<EDID identity>" */
+    gboolean wl_expanded;    /* Wayland: row expanded when it last had
+                              * display pages */
 } AmdGpuEntry;
 
 typedef struct {
     CtkWindow *window;
     GtkTextTagTable *tag_table;
     Display *dpy;
+    gboolean wayland;        /* display pages come from KMS */
     guint num_gpus;
     GList *entries;          /* AmdGpuEntry* */
     GtkWidget *prime;        /* PRIME page, or NULL */
@@ -1806,6 +1813,200 @@ static gboolean amd_randr_changed(gpointer user_data)
 }
 
 
+/*
+ * Wayland: the compositor owns the displays, so the display pages are built
+ * from the kernel's KMS state instead of XRandR (which only shows XWayland's
+ * virtual outputs).  Pages are rebuilt on DRM hotplug events.
+ */
+
+/* One key per connected display: the connector plus the monitor's EDID
+ * identity, so that swapping monitors on a connector rebuilds its page. */
+static GList *wl_find_outputs(AmdGpuEntry *entry)
+{
+    GList *keys = NULL, *l, *c;
+
+    for (l = entry->cards; l; l = l->next) {
+        GList *conns = dc_kms_connected(l->data);
+        for (c = conns; c; c = c->next) {
+            DcConnector *dc = c->data;
+            keys = g_list_append(keys, g_strdup_printf(
+                "%s-%s|%s|%04X|%s|%s", dc->card, dc->name,
+                dc->vendor ? dc->vendor : "", dc->product_code,
+                dc->serial ? dc->serial : "",
+                dc->monitor ? dc->monitor : ""));
+        }
+        dc_connector_list_free(conns);
+    }
+    return keys;
+}
+
+
+static void add_wl_display_pages(AmdPagesData *data, AmdGpuEntry *entry)
+{
+    GList *l, *c;
+
+    for (l = entry->cards; l; l = l->next) {
+        const gchar *card = l->data;
+        gchar *prefix = g_strconcat(card, "-", NULL);
+
+        for (c = entry->wl_outputs; c; c = c->next) {
+            const gchar *key = c->data;
+            GtkWidget *widget;
+            GtkTreeIter child;
+            gchar *connector;
+
+            if (!g_str_has_prefix(key, prefix)) {
+                continue;
+            }
+            connector = g_strndup(key + strlen(prefix),
+                                  strcspn(key + strlen(prefix), "|"));
+            widget = ctk_wl_display_new(card, connector, entry->gpu_label,
+                                        data->window->ctk_config);
+            g_free(connector);
+            if (!widget) {
+                continue;
+            }
+            add_page(widget,
+                     ctk_wl_display_create_help(data->tag_table,
+                                                CTK_WL_DISPLAY(widget)),
+                     data->window, &entry->iter, &child,
+                     CTK_WL_DISPLAY(widget)->title, NULL,
+                     ctk_wl_display_start_timer, ctk_wl_display_stop_timer);
+            g_array_append_val(entry->display_iters, child);
+        }
+        g_free(prefix);
+    }
+}
+
+
+static gboolean same_keys(GList *a, GList *b)
+{
+    for (; a && b; a = a->next, b = b->next) {
+        if (strcmp(a->data, b->data) != 0) {
+            return FALSE;
+        }
+    }
+    return a == NULL && b == NULL;
+}
+
+
+static gboolean amd_wl_changed(gpointer user_data)
+{
+    AmdPagesData *data = user_data;
+    CtkWindow *ctk_window = data->window;
+    GtkTreeModel *model = GTK_TREE_MODEL(ctk_window->tree_store);
+    GtkTreeSelection *selection =
+        gtk_tree_view_get_selection(ctk_window->treeview);
+    GList *l;
+
+    if (data->prime) {
+        ctk_prime_refresh(CTK_PRIME(data->prime));
+    }
+
+    for (l = data->entries; l; l = l->next) {
+        AmdGpuEntry *entry = l->data;
+        GList *outputs = wl_find_outputs(entry);
+        GtkTreePath *path;
+        gboolean expanded;
+        gchar *selected = NULL;
+        GtkWidget *widget;
+        guint i;
+
+        if (same_keys(outputs, entry->wl_outputs)) {
+            g_list_free_full(outputs, g_free);
+            continue;
+        }
+
+        /* Hotplug: rebuild this GPU's display pages.  A row without
+         * children is always collapsed, so remember the state it had when
+         * it last showed displays. */
+        path = gtk_tree_model_get_path(model, &entry->iter);
+        if (entry->display_iters->len) {
+            entry->wl_expanded =
+                gtk_tree_view_row_expanded(ctk_window->treeview, path);
+        }
+        expanded = entry->wl_expanded;
+
+        for (i = entry->display_iters->len; i > 0; i--) {
+            GtkTreeIter *it = &g_array_index(entry->display_iters,
+                                             GtkTreeIter, i - 1);
+            gtk_tree_model_get(model, it, CTK_WINDOW_WIDGET_COLUMN,
+                               &widget, -1);
+            if (gtk_tree_selection_iter_is_selected(selection, it)) {
+                if (widget) {
+                    selected = g_strdup(CTK_WL_DISPLAY(widget)->key);
+                }
+                gtk_tree_selection_select_iter(selection, &entry->iter);
+            }
+            gtk_tree_store_remove(ctk_window->tree_store, it);
+            if (widget) {
+                /* See amd_randr_changed() */
+                g_object_unref(G_OBJECT(widget));
+                g_object_unref(G_OBJECT(widget));
+            }
+        }
+        g_array_set_size(entry->display_iters, 0);
+
+        g_list_free_full(entry->wl_outputs, g_free);
+        entry->wl_outputs = outputs;
+        add_wl_display_pages(data, entry);
+
+        if (expanded) {
+            gtk_tree_view_expand_row(ctk_window->treeview, path, TRUE);
+        }
+        gtk_tree_path_free(path);
+
+        for (i = 0; selected && i < entry->display_iters->len; i++) {
+            GtkTreeIter *it = &g_array_index(entry->display_iters,
+                                             GtkTreeIter, i);
+            gtk_tree_model_get(model, it, CTK_WINDOW_WIDGET_COLUMN,
+                               &widget, -1);
+            if (widget && strcmp(CTK_WL_DISPLAY(widget)->key, selected) == 0) {
+                gtk_tree_selection_select_iter(selection, it);
+                break;
+            }
+        }
+        g_free(selected);
+    }
+
+    return FALSE;
+}
+
+
+static void entry_add_display_pages(AmdPagesData *data, AmdGpuEntry *entry)
+{
+    if (data->wayland) {
+        entry->wl_expanded = TRUE;      /* the tree starts fully expanded */
+        entry->wl_outputs = wl_find_outputs(entry);
+        add_wl_display_pages(data, entry);
+    } else if (data->dpy) {
+        entry->outputs = entry_find_outputs(data, entry);
+        add_amd_display_pages(data, entry);
+    }
+}
+
+
+/* The tree row of the NVIDIA GPU page for 'target'. */
+static gboolean find_gpu_page(CtkWindow *ctk_window, CtrlTarget *target,
+                              GtkTreeIter *iter)
+{
+    GtkTreeModel *model = GTK_TREE_MODEL(ctk_window->tree_store);
+    gboolean valid;
+
+    for (valid = gtk_tree_model_get_iter_first(model, iter); valid;
+         valid = gtk_tree_model_iter_next(model, iter)) {
+        GtkWidget *widget = NULL;
+
+        gtk_tree_model_get(model, iter, CTK_WINDOW_WIDGET_COLUMN, &widget, -1);
+        if (widget && CTK_IS_GPU(widget) &&
+            CTK_GPU(widget)->ctrl_target == target) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+
 static void add_amd_gpu_pages(CtkWindow *ctk_window,
                               GtkTextTagTable *tag_table,
                               CtrlSystem *system)
@@ -1819,6 +2020,9 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
     data->window = ctk_window;
     data->tag_table = tag_table;
     data->dpy = ctk_amd_display_get_xdisplay();
+    data->wayland = !data->dpy &&
+                    dc_session_type() == DC_SESSION_WAYLAND &&
+                    dc_kms_available();
     data->num_gpus = g_list_length(gpus);
 
     for (l = gpus; l; l = l->next) {
@@ -1848,6 +2052,7 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
         entry->gpu = gpu;
         entry->gpu_label = label;
         entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
+        entry->cards = g_list_append(NULL, g_strdup(gpu->card_name));
 
         add_page(widget, ctk_amd_gpu_create_help(tag_table,
                                                  CTK_AMD_GPU(widget)),
@@ -1875,10 +2080,7 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
                      ctk_amd_powermizer_stop_timer);
         }
 
-        if (data->dpy) {
-            entry->outputs = entry_find_outputs(data, entry);
-            add_amd_display_pages(data, entry);
-        }
+        entry_add_display_pages(data, entry);
 
         data->entries = g_list_append(data->entries, entry);
     }
@@ -1903,6 +2105,27 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
         g->card = drm_card_for_pci_slot(g->pci_slot);
         g->label = create_gpu_name_string(gpu_target);
         nv_gpus = g_list_append(nv_gpus, g);
+
+        /*
+         * Wayland: the compositor drives every GPU's outputs directly, so a
+         * display on an NVIDIA GPU goes under that GPU's page like the AMD
+         * ones.  (On X11 they only work through reverse PRIME and are shown
+         * under the PRIME page.)
+         */
+        if (data->wayland && g->card) {
+            AmdGpuEntry *entry = g_new0(AmdGpuEntry, 1);
+
+            if (!find_gpu_page(ctk_window, gpu_target, &entry->iter)) {
+                g_free(entry);
+                continue;
+            }
+            entry->gpu_label = g_strdup(g->label);
+            entry->display_iters =
+                g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
+            entry->cards = g_list_append(NULL, g_strdup(g->card));
+            entry_add_display_pages(data, entry);
+            data->entries = g_list_append(data->entries, entry);
+        }
     }
 
     data->prime = ctk_prime_new(data->dpy, nv_gpus, card_names,
@@ -1918,10 +2141,16 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
                  ctk_prime_create_help(tag_table, CTK_PRIME(data->prime)),
                  ctk_window, NULL, &entry->iter, "PRIME Render Offload", NULL,
                  ctk_prime_start_timer, ctk_prime_stop_timer);
-        if (data->dpy) {
-            entry->outputs = entry_find_outputs(data, entry);
-            add_amd_display_pages(data, entry);
+        /* Reverse PRIME displays (X11); on Wayland they are under the
+         * NVIDIA GPU pages. */
+        for (l = CTK_PRIME(data->prime)->nv_gpus; l && !data->wayland;
+             l = l->next) {
+            CtkPrimeGpu *g = l->data;
+            if (g->card) {
+                entry->cards = g_list_append(entry->cards, g_strdup(g->card));
+            }
         }
+        entry_add_display_pages(data, entry);
         data->entries = g_list_append(data->entries, entry);
     }
 
@@ -1932,6 +2161,8 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
 
     if (data->dpy) {
         ctk_amd_display_watch_randr(data->dpy, amd_randr_changed, data);
+    } else if (data->wayland) {
+        dc_watch_hotplug(amd_wl_changed, data);
     } else {
         nv_info_msg(NULL, "AMD and PRIME display pages are unavailable: the "
                     "GUI is not running on an X11 display with XRandR 1.3 "

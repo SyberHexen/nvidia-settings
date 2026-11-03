@@ -38,6 +38,7 @@
 #include "nvml.h"
 
 #include "ctkprime.h"
+#include "displaycfg.h"
 #include "ctkbanner.h"
 #include "ctkhelp.h"
 #include "ctkutils.h"
@@ -997,7 +998,146 @@ static gboolean update_live(gpointer data)
 
     update_power(page);
     update_processes(page);
+
+    /*
+     * Wayland: the hotplug event arrives while the compositor is still
+     * switching outputs, so pick up the state it settles in.
+     */
+    if (page->wl_state) {
+        gchar *now = dc_connector_state_signature();
+        if (strcmp(now, page->wl_state) != 0) {
+            ctk_prime_refresh(page);
+        }
+        g_free(now);
+    }
     return TRUE;
+}
+
+
+/*
+ * Wayland: there are no RandR providers.  The compositor drives every GPU's
+ * outputs itself, so show which GPUs have displays (from KMS) and which
+ * ones the compositor has open.
+ */
+static void refresh_wayland(CtkPrime *page)
+{
+    const DcCompositor *comp = dc_compositor();
+    GList *cards, *l, *c;
+    GString *display_gpus = g_string_new(NULL);
+    GtkWidget *table;
+    gboolean nv_has_display = FALSE;
+    gint row = 0;
+    gchar *s;
+
+    /* Before reading the state, so a change while reading is noticed */
+    g_free(page->wl_state);
+    page->wl_state = dc_connector_state_signature();
+    cards = enumerate_cards();
+
+    s = g_strdup_printf("Render offload (Wayland, %s)",
+                        comp && comp->desktop ? comp->desktop :
+                        "unknown compositor");
+    gtk_label_set_text(GTK_LABEL(page->mode_label), s);
+    g_free(s);
+
+    gtk_label_set_text(GTK_LABEL(page->offload_gpu_label),
+                       ctk_prime_nvidia_gpu_label(page));
+    gtk_label_set_text(GTK_LABEL(page->offload_label),
+                       "Available.  The environment variables below offload "
+                       "Vulkan, EGL and\nXWayland GLX applications.");
+
+    table = new_table();
+    gtk_table_resize(GTK_TABLE(table), 1, 3);
+    grid_cell(table, 0, row, "GPU", TRUE);
+    grid_cell(table, 1, row, "Driver", TRUE);
+    grid_cell(table, 2, row, "Displays", TRUE);
+    row++;
+
+    for (l = cards; l; l = l->next) {
+        DrmCard *card = l->data;
+        GList *conns = dc_kms_connected(card->name);
+        GString *outs = g_string_new(NULL);
+        gboolean active = FALSE;
+        gchar *gpu = card_label(page, card);
+
+        for (c = conns; c; c = c->next) {
+            DcConnector *dc = c->data;
+            if (outs->len) g_string_append(outs, ", ");
+            g_string_append(outs, dc->name);
+            if (dc->monitor) {
+                g_string_append_printf(outs, " (%s)", dc->monitor);
+            }
+            if (!dc->active) {
+                g_string_append(outs, " (off)");
+            } else {
+                active = TRUE;
+            }
+        }
+        if (active) {
+            if (display_gpus->len) g_string_append(display_gpus, "\n");
+            g_string_append(display_gpus, gpu);
+            if (card->vendor == NVIDIA_PCI_VENDOR_ID) {
+                nv_has_display = TRUE;
+            }
+        }
+
+        gtk_table_resize(GTK_TABLE(table), row + 1, 3);
+        grid_cell(table, 0, row, gpu, FALSE);
+        grid_cell(table, 1, row, card->driver, FALSE);
+        grid_cell(table, 2, row, outs->len ? outs->str : "None", FALSE);
+        row++;
+
+        g_string_free(outs, TRUE);
+        g_free(gpu);
+        dc_connector_list_free(conns);
+    }
+
+    gtk_label_set_text(GTK_LABEL(page->display_gpu_label),
+                       display_gpus->len ? display_gpus->str : "Unknown");
+    g_string_free(display_gpus, TRUE);
+
+    gtk_box_pack_start(GTK_BOX(page->providers_box), table, FALSE, FALSE, 0);
+
+    if (comp && comp->cards) {
+        GString *used = g_string_new(NULL);
+        GtkWidget *w;
+
+        for (c = comp->cards; c; c = c->next) {
+            DrmCard *card = NULL;
+            for (l = cards; l; l = l->next) {
+                if (strcmp(((DrmCard *) l->data)->name, c->data) == 0) {
+                    card = l->data;
+                }
+            }
+            if (card) {
+                gchar *gpu = card_label(page, card);
+                if (used->len) g_string_append(used, ", ");
+                g_string_append(used, gpu);
+                g_free(gpu);
+            }
+        }
+        s = g_strdup_printf("The compositor (%s) has these GPUs open: %s.",
+                            comp->process ? comp->process : "unknown",
+                            used->len ? used->str : "none");
+        w = left_label(s, FALSE);
+        gtk_label_set_line_wrap(GTK_LABEL(w), TRUE);
+        gtk_box_pack_start(GTK_BOX(page->providers_box), w, FALSE, FALSE, 5);
+        g_free(s);
+        g_string_free(used, TRUE);
+    }
+    if (nv_has_display) {
+        GtkWidget *w = left_label("Displays connected to the NVIDIA GPU are "
+                                  "driven directly by the compositor; reverse "
+                                  "PRIME is not needed under Wayland.  They "
+                                  "appear as pages under the NVIDIA GPU.",
+                                  FALSE);
+        gtk_label_set_line_wrap(GTK_LABEL(w), TRUE);
+        gtk_box_pack_start(GTK_BOX(page->providers_box), w, FALSE, FALSE, 5);
+    }
+
+    gtk_widget_show_all(page->providers_box);
+    g_list_free_full(cards, drm_card_free);
+    update_env_labels(page);
 }
 
 
@@ -1027,6 +1167,11 @@ void ctk_prime_refresh(CtkPrime *page)
     clear_container(page->providers_box);
     if (page->outputs_box) {
         clear_container(page->outputs_box);
+    }
+
+    if (!page->dpy && dc_session_type() == DC_SESSION_WAYLAND) {
+        refresh_wayland(page);
+        return;
     }
 
     if (!have_randr_providers(page->dpy)) {
@@ -1296,6 +1441,8 @@ static void page_destroyed(GObject *obj, gpointer data)
     g_free(page->offload_provider);
     g_free(page->nv_provider_label);
     page->offload_provider = page->nv_provider_label = NULL;
+    g_free(page->wl_state);
+    page->wl_state = NULL;
     if (page->proc_store) {
         g_object_unref(page->proc_store);
         page->proc_store = NULL;
@@ -1424,7 +1571,8 @@ GtkWidget *ctk_prime_new(Display *dpy, GList *nv_gpus, GList *card_names,
     }
     g_free(layer);
 
-    sec = ctk_section_box_new(vbox, "XRandR Providers");
+    sec = ctk_section_box_new(vbox, (!dpy && dc_session_type() == DC_SESSION_WAYLAND)
+                            ? "GPU Displays" : "XRandR Providers");
     page->providers_box = gtk_vbox_new(FALSE, 0);
     ctk_config_set_tooltip(ctk_config, page->providers_box, __providers_help);
     gtk_box_pack_start(GTK_BOX(sec), page->providers_box, FALSE, FALSE, 0);

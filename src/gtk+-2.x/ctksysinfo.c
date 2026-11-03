@@ -56,6 +56,7 @@
 #endif
 
 #include "ctksysinfo.h"
+#include "displaycfg.h"
 #include "ctkutils.h"
 #include "ctkhelp.h"
 #include "amdgpu-sysfs.h"
@@ -757,10 +758,22 @@ static void add_amd_section(GtkWidget *vbox, GList *amd_gpus,
     g_free(s);
     g_free(mod);
 
-    s = x_display_driver();
-    row(table, &r, "X Display Driver:",
-        s ? s : (ctk_amd_display_get_xdisplay() ? "Unknown"
-                                                : "None (not running on X11)"));
+    if (dc_session_type() == DC_SESSION_WAYLAND) {
+        const DcCompositor *comp = dc_compositor();
+        if (comp && comp->process) {
+            s = g_strdup_printf("Wayland (%s, %s)",
+                                comp->desktop ? comp->desktop : "unknown",
+                                comp->process);
+        } else {
+            s = g_strdup("Wayland");
+        }
+        row(table, &r, "Display Server:", s);
+    } else {
+        s = x_display_driver();
+        row(table, &r, "X Display Driver:",
+            s ? s : (ctk_amd_display_get_xdisplay() ? "Unknown"
+                                                    : "None (not running on X11)"));
+    }
     g_free(s);
 
     mesa = mesa_version(vk_devices, gl_devices);
