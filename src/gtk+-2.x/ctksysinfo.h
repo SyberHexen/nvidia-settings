@@ -26,15 +26,17 @@
 G_BEGIN_DECLS
 
 /*
- * Append the "Vulkan Information" and (when an amdgpu GPU is present)
- * "AMD Driver Information" sections to the System Information page.
- * Sets *have_vulkan / *have_amd to whether each section was added.
+ * Append the "Vulkan Information", "OpenGL Information" and (when an
+ * amdgpu GPU is present) "AMD Driver Information" sections to the System
+ * Information page.  Sets each *have_* flag to whether its section was
+ * added.
  */
 void ctk_sysinfo_add_sections(GtkWidget *vbox, gboolean *have_vulkan,
-                              gboolean *have_amd);
+                              gboolean *have_gl, gboolean *have_amd);
 
 void ctk_sysinfo_add_help(GtkTextBuffer *b, GtkTextIter *i,
-                          gboolean have_vulkan, gboolean have_amd);
+                          gboolean have_vulkan, gboolean have_gl,
+                          gboolean have_amd);
 
 G_END_DECLS
 
