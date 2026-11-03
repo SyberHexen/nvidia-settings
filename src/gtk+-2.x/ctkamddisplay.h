@@ -50,7 +50,8 @@ struct _CtkAmdDisplay
     gchar *output_name;
     gchar *title;
 
-    AmdGpu *gpu;                 /* not owned */
+    AmdGpu *gpu;                 /* not owned; NULL for NVIDIA outputs */
+    gchar *gpu_label;            /* "card1 - (AMD Radeon ...)" */
     AmdConnector *connector;     /* not owned, may be NULL */
 
     /* information labels */
@@ -101,8 +102,13 @@ Display       *ctk_amd_display_get_xdisplay(void);
 GList         *ctk_amd_display_find_outputs(Display *dpy, AmdGpu *gpu,
                                             guint num_amd_gpus);
 
+/* 'gpu' may be NULL for outputs of a non-AMD GPU (e.g. NVIDIA reverse PRIME
+ * outputs); 'gpu_label' names the GPU on the page (defaults to the AMD
+ * product name). */
 GtkWidget*     ctk_amd_display_new         (Display *dpy, XID output,
-                                            AmdGpu *gpu, CtkConfig *config);
+                                            AmdGpu *gpu,
+                                            const gchar *gpu_label,
+                                            CtkConfig *config);
 GtkTextBuffer* ctk_amd_display_create_help (GtkTextTagTable *,
                                             CtkAmdDisplay *);
 
