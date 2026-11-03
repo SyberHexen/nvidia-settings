@@ -25,6 +25,7 @@
 #include <NvCtrlAttributes.h>
 #include "NVCtrlLib.h"
 #include "ctkutils.h"
+#include "amdgpu-sysfs.h"
 #include "msg.h"
 
 /*
@@ -563,24 +564,71 @@ void update_display_enabled_flag(CtrlTarget *ctrl_target,
 
 
 
+gchar *ctk_gpu_pci_slot(CtrlTarget *ctrl_target)
+{
+    int domain, bus, device, func;
+
+    if (NvCtrlGetAttribute(ctrl_target, NV_CTRL_PCI_DOMAIN, &domain)
+            != NvCtrlSuccess ||
+        NvCtrlGetAttribute(ctrl_target, NV_CTRL_PCI_BUS, &bus)
+            != NvCtrlSuccess ||
+        NvCtrlGetAttribute(ctrl_target, NV_CTRL_PCI_DEVICE, &device)
+            != NvCtrlSuccess ||
+        NvCtrlGetAttribute(ctrl_target, NV_CTRL_PCI_FUNCTION, &func)
+            != NvCtrlSuccess) {
+        return NULL;
+    }
+    return g_strdup_printf("%04x:%02x:%02x.%x", domain, bus, device, func);
+}
+
+
+
+gchar *ctk_gpu_drm_card_name(CtrlTarget *ctrl_target)
+{
+    gchar *slot = ctk_gpu_pci_slot(ctrl_target);
+    gchar *card = drm_card_for_pci_slot(slot);
+
+    g_free(slot);
+    return card;
+}
+
+
+
 gchar* create_gpu_name_string(CtrlTarget *ctrl_target)
 {
     gchar *gpu_name;
-    gchar *gpu_product_name;
+    gchar *gpu_product_name = NULL;
+    gchar *card;
     ReturnStatus ret;
 
     ret = NvCtrlGetStringAttribute(ctrl_target,
                                    NV_CTRL_STRING_PRODUCT_NAME,
                                    &gpu_product_name);
-    if (ret == NvCtrlSuccess && gpu_product_name) {
-        gpu_name = g_strdup_printf("GPU %d - (%s)",
-                                   NvCtrlGetTargetId(ctrl_target),
-                                   gpu_product_name);
-    } else {
-        gpu_name = g_strdup_printf("GPU %d - (Unknown)",
-                                   NvCtrlGetTargetId(ctrl_target));
+    if (ret != NvCtrlSuccess) {
+        gpu_product_name = NULL;
     }
-    g_free(gpu_product_name);
+
+    /*
+     * Name GPUs after their DRM card node (card0, card1, ...) so they are
+     * numbered consistently with GPUs from other vendors.  Fall back to the
+     * NV-CONTROL GPU index when there is no DRM device.
+     */
+    card = ctk_gpu_drm_card_name(ctrl_target);
+    if (card) {
+        gchar *name = drm_gpu_name(card);
+        g_free(card);
+        card = name;
+        gpu_name = g_strdup_printf("%s - (%s)", card,
+                                   gpu_product_name ? gpu_product_name
+                                                    : "Unknown");
+    } else {
+        gpu_name = g_strdup_printf("GPU_%d - (%s)",
+                                   NvCtrlGetTargetId(ctrl_target),
+                                   gpu_product_name ? gpu_product_name
+                                                    : "Unknown");
+    }
+    g_free(card);
+    free(gpu_product_name);
 
     return gpu_name;
 }
