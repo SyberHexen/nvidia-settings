@@ -606,6 +606,34 @@ static gboolean probe_opengl(GList **devices)
 #endif
 
 
+/*
+ * GL_VERSION is "<version> <vendor-specific information>", e.g.
+ * "4.6.0 NVIDIA 615.78.08" or "4.6 (Compatibility Profile) Mesa 26.2.6".
+ * The version is implied by the GLSL version shown next to it, so return
+ * just the driver part, with Mesa's profile after the driver name:
+ * "NVIDIA 615.78.08", "Mesa 26.2.6 (Compatibility Profile)".
+ */
+static gchar *gl_driver_string(const gchar *version)
+{
+    const gchar *rest = strchr(version, ' ');
+
+    if (!rest || !rest[1]) {
+        return g_strdup_printf("OpenGL %s", version);
+    }
+    rest++;
+    if (rest[0] == '(') {
+        const gchar *close = strchr(rest, ')');
+        if (close && close[1] == ' ' && close[2]) {
+            gchar *profile = g_strndup(rest, close - rest + 1);
+            gchar *ret = g_strdup_printf("%s %s", close + 2, profile);
+            g_free(profile);
+            return ret;
+        }
+    }
+    return g_strdup(rest);
+}
+
+
 /* Sort by GPU_N; both VkDev and GlDev start with their "GPU_N" name. */
 static gint compare_vkdev(gconstpointer a, gconstpointer b)
 {
@@ -794,10 +822,12 @@ void ctk_sysinfo_add_sections(GtkWidget *vbox, gboolean *have_vulkan,
             GlDev *d = l->data;
             gchar *name = d->gpu ? g_strdup_printf("%s:", d->gpu)
                                  : g_strdup("Software:");
+            gchar *driver = gl_driver_string(d->version);
             gchar *value = d->glsl ?
-                g_strdup_printf("%s\nOpenGL %s, GLSL %s", d->renderer,
-                                d->version, d->glsl) :
-                g_strdup_printf("%s\nOpenGL %s", d->renderer, d->version);
+                g_strdup_printf("%s\n%s, GLSL %s", d->renderer, driver,
+                                d->glsl) :
+                g_strdup_printf("%s\n%s", d->renderer, driver);
+            g_free(driver);
             row(table, &r, name, value);
             g_free(value);
             g_free(name);
@@ -838,8 +868,9 @@ void ctk_sysinfo_add_help(GtkTextBuffer *b, GtkTextIter *i,
     }
     if (have_gl) {
         ctk_help_heading(b, i, "OpenGL Devices");
-        ctk_help_para(b, i, "The OpenGL renderer, version and GLSL version "
-                      "of each GPU.  Each GPU is queried directly through "
+        ctk_help_para(b, i, "The OpenGL renderer, driver and GLSL version "
+                      "of each GPU (the GLSL version matches the OpenGL "
+                      "version: GLSL 4.60 is OpenGL 4.6).  Each GPU is queried directly through "
                       "the EGL device platform, so this includes the PRIME "
                       "render offload GPU, which applications only use when "
                       "they are offloaded to it.  The version is that of a "
