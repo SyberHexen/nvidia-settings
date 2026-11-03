@@ -32,6 +32,7 @@
 #include <X11/extensions/Xrandr.h>
 
 #include "ctkamddisplay.h"
+#include "displaycfg.h"
 #include "ctkbanner.h"
 #include "ctkhelp.h"
 #include "ctkutils.h"
@@ -180,6 +181,11 @@ Display *ctk_amd_display_get_xdisplay(void)
         return NULL;
     }
 #endif
+    /* XWayland's RandR outputs are virtual and cannot be configured; the
+     * Wayland compositor owns the real displays. */
+    if (dc_session_type() == DC_SESSION_WAYLAND) {
+        return NULL;
+    }
     dpy = GDK_DISPLAY_XDISPLAY(gdpy);
     if (!dpy || !XRRQueryExtension(dpy, &ev, &err) ||
         !XRRQueryVersion(dpy, &major, &minor) ||
