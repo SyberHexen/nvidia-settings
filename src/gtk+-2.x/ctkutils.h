@@ -186,6 +186,14 @@ gchar *ctk_get_filename_from_dialog(const gchar* title,
 GdkPixbuf *ctk_pixbuf_from_data(const char *start, const char *end);
 #define CTK_LOAD_PIXBUF(art) ctk_pixbuf_from_data(_binary_##art##_png_start, _binary_##art##_png_end)
 
+/*
+ * Page sections: a heading (the title followed by a separator line) packed
+ * into 'vbox', then the section's content area, which is returned: a
+ * two-column table for label/value rows, or a vertical box.
+ */
+GtkWidget *ctk_section_table_new(GtkWidget *vbox, const gchar *title);
+GtkWidget *ctk_section_box_new(GtkWidget *vbox, const gchar *title);
+
 G_END_DECLS
 
 #endif /* __CTK_UTILS_H__ */
