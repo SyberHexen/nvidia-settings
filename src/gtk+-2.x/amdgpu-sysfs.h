@@ -50,6 +50,15 @@ typedef struct _AmdGpu {
     GList *connectors;    /* list of AmdConnector* */
 } AmdGpu;
 
+/*
+ * Returns the DRM card node name ("card0") of the PCI device at 'pci_slot'
+ * ("0000:01:00.0"), or NULL if it has none.  Works for any GPU vendor.
+ */
+gchar   *drm_card_for_pci_slot(const gchar *pci_slot);
+
+/* User-visible GPU name for a DRM card node: "card1" -> "GPU_1" */
+gchar   *drm_gpu_name(const gchar *card);
+
 /* Discovery */
 GList   *amdgpu_enumerate(void);      /* returns list of AmdGpu* */
 void     amdgpu_free_list(GList *gpus);

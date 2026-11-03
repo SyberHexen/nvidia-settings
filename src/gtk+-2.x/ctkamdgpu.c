@@ -844,7 +844,11 @@ GtkWidget *ctk_amd_gpu_new(AmdGpu *gpu, CtkConfig *ctk_config)
     build_status_section(ctk, vbox);
     build_power_section(ctk, vbox);
 
-    timer_name = g_strdup_printf("AMD GPU %d Monitor", gpu->index);
+    {
+        gchar *name = drm_gpu_name(gpu->card_name);
+        timer_name = g_strdup_printf("%s (AMD) Monitor", name);
+        g_free(name);
+    }
     ctk_config_add_timer(ctk_config, AMD_GPU_UPDATE_INTERVAL_MS, timer_name,
                          (GSourceFunc) update_status, (gpointer) ctk);
     g_free(timer_name);

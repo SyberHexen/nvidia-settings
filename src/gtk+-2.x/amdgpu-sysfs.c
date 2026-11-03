@@ -364,6 +364,42 @@ static gint compare_gpus(gconstpointer a, gconstpointer b)
 }
 
 
+gchar *drm_card_for_pci_slot(const gchar *pci_slot)
+{
+    gchar *path;
+    GDir *dir;
+    const gchar *entry;
+    gchar *ret = NULL;
+
+    if (!pci_slot) {
+        return NULL;
+    }
+    path = g_build_filename("/sys/bus/pci/devices", pci_slot, "drm", NULL);
+    dir = g_dir_open(path, 0, NULL);
+    g_free(path);
+    if (!dir) {
+        return NULL;
+    }
+    while ((entry = g_dir_read_name(dir))) {
+        if (is_card_dir(entry)) {
+            ret = g_strdup(entry);
+            break;
+        }
+    }
+    g_dir_close(dir);
+    return ret;
+}
+
+
+gchar *drm_gpu_name(const gchar *card)
+{
+    if (card && is_card_dir(card)) {
+        return g_strdup_printf("GPU_%s", card + 4);
+    }
+    return g_strdup(card ? card : "GPU");
+}
+
+
 GList *amdgpu_enumerate(void)
 {
     GDir *dir = g_dir_open(DRM_SYSFS_DIR, 0, NULL);

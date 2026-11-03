@@ -1818,8 +1818,11 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
         entry->gpu = gpu;
         entry->display_iters = g_array_new(FALSE, FALSE, sizeof(GtkTreeIter));
 
-        label = g_strdup_printf("AMD GPU %d - (%s)", gpu->index,
-                                gpu->product_name);
+        {
+            gchar *name = drm_gpu_name(gpu->card_name);
+            label = g_strdup_printf("%s - (%s)", name, gpu->product_name);
+            g_free(name);
+        }
         add_page(widget, ctk_amd_gpu_create_help(tag_table,
                                                  CTK_AMD_GPU(widget)),
                  ctk_window, NULL, &entry->iter, label, NULL,

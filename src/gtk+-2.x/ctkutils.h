@@ -141,6 +141,8 @@ gchar *get_pcie_link_speed_string(CtrlTarget *ctrl_target, gint attribute);
 gchar *get_nvidia_driver_version(CtrlTarget *ctrl_target);
 
 gchar* create_gpu_name_string(CtrlTarget *ctrl_target);
+gchar *ctk_gpu_pci_slot(CtrlTarget *ctrl_target);
+gchar *ctk_gpu_drm_card_name(CtrlTarget *ctrl_target);
 
 gchar* create_display_name_list_string(CtrlTarget *ctrl_target,
                                        unsigned int attr);
