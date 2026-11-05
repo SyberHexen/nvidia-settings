@@ -105,94 +105,141 @@ gboolean amdgpu_file_writable(const gchar *dir, const gchar *file)
 
 
 /*
- * Write directly; if that fails with a permission error, retry through
- * pkexec.  The value and path are passed as positional parameters to the
- * shell so they are never interpreted as shell syntax.
+ * Write each value to its sysfs file in order.  Values are written directly
+ * first; from the first permission error on, the remaining writes go through
+ * a single pkexec call, so one change asks for authentication only once.
+ * The values and paths are passed as positional parameters to the shell so
+ * they are never interpreted as shell syntax.  Stops at the first failure.
  */
 
-gboolean amdgpu_write_string(const gchar *dir, const gchar *file,
-                             const gchar *value, gchar **error_msg)
+gboolean amdgpu_write_strings(const gchar *dir, const gchar * const *files,
+                              const gchar * const *values, guint n,
+                              gchar **error_msg)
 {
-    gchar *path = build_path(dir, file);
+    gchar **paths = g_new0(gchar *, n + 1);
     gboolean ret = FALSE;
-    FILE *fp;
-    int err = 0;
+    guint i;
 
     if (error_msg) {
         *error_msg = NULL;
     }
 
-    /* Only ever touch sysfs files. */
-    if (!g_str_has_prefix(path, "/sys/")) {
+    for (i = 0; i < n; i++) {
+        paths[i] = build_path(dir, files[i]);
+
+        /* Only ever touch sysfs files. */
+        if (!g_str_has_prefix(paths[i], "/sys/")) {
+            if (error_msg) {
+                *error_msg = g_strdup_printf("Refusing to write outside "
+                                             "sysfs: %s", paths[i]);
+            }
+            goto done;
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        FILE *fp = fopen(paths[i], "w");
+        gboolean ok = FALSE;
+        int err = 0;
+
+        if (fp) {
+            if (fputs(values[i], fp) >= 0 && fflush(fp) == 0) {
+                ok = TRUE;
+            } else {
+                err = errno;
+            }
+            if (fclose(fp) != 0 && ok) {
+                err = errno;
+                ok = FALSE;
+            }
+        } else {
+            err = errno;
+        }
+
+        if (ok) {
+            continue;
+        }
+        if (err == EACCES || err == EPERM) {
+            break;      /* escalate the rest */
+        }
         if (error_msg) {
-            *error_msg = g_strdup_printf("Refusing to write outside sysfs: %s",
-                                         path);
+            *error_msg = fp ?
+                g_strdup_printf("Unable to write '%s' to %s: %s",
+                                values[i], paths[i], g_strerror(err)) :
+                g_strdup_printf("Unable to open %s: %s",
+                                paths[i], g_strerror(err));
         }
         goto done;
     }
 
-    fp = fopen(path, "w");
-    if (fp) {
-        if (fputs(value, fp) >= 0 && fflush(fp) == 0) {
-            ret = TRUE;
-        } else {
-            err = errno;
-        }
-        if (fclose(fp) != 0 && ret) {
-            err = errno;
-            ret = FALSE;
-        }
-        if (ret || (err != EACCES && err != EPERM)) {
-            if (!ret && error_msg) {
-                *error_msg = g_strdup_printf("Unable to write '%s' to %s: %s",
-                                             value, path, g_strerror(err));
-            }
-            goto done;
-        }
-    } else {
-        err = errno;
-        if (err != EACCES && err != EPERM) {
-            if (error_msg) {
-                *error_msg = g_strdup_printf("Unable to open %s: %s",
-                                             path, g_strerror(err));
-            }
-            goto done;
-        }
+    if (i == n) {
+        ret = TRUE;
+        goto done;
     }
 
-    /* Permission denied: escalate via polkit. */
+    /* Permission denied: escalate the remaining writes via polkit. */
     {
-        gchar *argv[] = {
-            "pkexec", "/bin/sh", "-c", "printf '%s' \"$1\" > \"$2\"",
-            "sh", (gchar *) value, path, NULL
-        };
+        GPtrArray *argv = g_ptr_array_new();
+        guint first = i;
         gint status = 0;
         gchar *std_err = NULL;
         GError *gerr = NULL;
 
-        if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                          NULL, NULL, NULL, &std_err, &status, &gerr)) {
+        g_ptr_array_add(argv, "pkexec");
+        g_ptr_array_add(argv, "/bin/sh");
+        g_ptr_array_add(argv, "-c");
+        g_ptr_array_add(argv,
+                        "while [ $# -gt 0 ]; do "
+                        "printf '%s' \"$1\" > \"$2\" || exit 1; shift 2; "
+                        "done");
+        g_ptr_array_add(argv, "sh");
+        for (i = first; i < n; i++) {
+            g_ptr_array_add(argv, (gpointer) values[i]);
+            g_ptr_array_add(argv, paths[i]);
+        }
+        g_ptr_array_add(argv, NULL);
+
+        if (!g_spawn_sync(NULL, (gchar **) argv->pdata, NULL,
+                          G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &std_err,
+                          &status, &gerr)) {
             if (error_msg) {
                 *error_msg = g_strdup_printf(
                     "Root privileges are required to write %s, and pkexec "
                     "could not be run (%s).  Run nvidia-settings as root or "
-                    "install polkit.", path, gerr ? gerr->message : "unknown");
+                    "install polkit.", paths[first],
+                    gerr ? gerr->message : "unknown");
             }
             g_clear_error(&gerr);
         } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
             ret = TRUE;
         } else if (error_msg) {
             g_strstrip(std_err ? std_err : (std_err = g_strdup("")));
-            *error_msg = g_strdup_printf(
-                "Failed to write '%s' to %s with elevated privileges%s%s",
-                value, path, std_err[0] ? ": " : ".", std_err);
+            if (n - first == 1) {
+                *error_msg = g_strdup_printf(
+                    "Failed to write '%s' to %s with elevated privileges%s%s",
+                    values[first], paths[first],
+                    std_err[0] ? ": " : ".", std_err);
+            } else {
+                *error_msg = g_strdup_printf(
+                    "Failed to write to %s with elevated privileges%s%s",
+                    dir ? dir : paths[first],
+                    std_err[0] ? ": " : ".", std_err);
+            }
         }
         g_free(std_err);
+        g_ptr_array_free(argv, TRUE);
     }
 
  done:
-    g_free(path);
+    g_strfreev(paths);
     return ret;
+}
+
+
+gboolean amdgpu_write_string(const gchar *dir, const gchar *file,
+                             const gchar *value, gchar **error_msg)
+{
+    return amdgpu_write_strings(dir, &file, &value, 1, error_msg);
 }
 
 
