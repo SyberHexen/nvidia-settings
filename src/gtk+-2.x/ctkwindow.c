@@ -74,6 +74,7 @@
 
 #include "amdgpu-sysfs.h"
 #include "ctkamdgpu.h"
+#include "ctkamdthermal.h"
 #include "ctkamddisplay.h"
 #include "ctkprime.h"
 
@@ -1851,6 +1852,16 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
                                                  CTK_AMD_GPU(widget)),
                  ctk_window, NULL, &entry->iter, label, NULL,
                  ctk_amd_gpu_start_timer, ctk_amd_gpu_stop_timer);
+
+        /* Thermal Settings, under the GPU like the NVIDIA GPU pages */
+        widget = ctk_amd_thermal_new(gpu, ctk_window->ctk_config);
+        if (widget) {
+            add_page(widget,
+                     ctk_amd_thermal_create_help(tag_table,
+                                                 CTK_AMD_THERMAL(widget)),
+                     ctk_window, &entry->iter, NULL, "Thermal Settings", NULL,
+                     ctk_amd_thermal_start_timer, ctk_amd_thermal_stop_timer);
+        }
 
         if (data->dpy) {
             entry->outputs = entry_find_outputs(data, entry);
