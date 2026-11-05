@@ -77,6 +77,9 @@ gboolean amdgpu_file_writable(const gchar *dir, const gchar *file);
  */
 gboolean amdgpu_write_string(const gchar *dir, const gchar *file,
                              const gchar *value, gchar **error_msg);
+gboolean amdgpu_write_strings(const gchar *dir, const gchar * const *files,
+                              const gchar * const *values, guint n,
+                              gchar **error_msg);
 
 /* DPM clock table (pp_dpm_sclk, pp_dpm_mclk, ...) */
 typedef struct _AmdDpmLevel {
