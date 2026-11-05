@@ -48,29 +48,11 @@ struct _CtkAmdGpu
     CtkConfig *ctk_config;
     AmdGpu *gpu;                 /* owned */
 
-    /* live status labels */
-    GtkWidget *gpu_busy;
-    GtkWidget *mem_busy;
-    GtkWidget *vram_usage;
-    GtkWidget *gtt_usage;
-    GtkWidget *sclk;
-    GtkWidget *mclk;
-    GtkWidget *power;
-    GtkWidget *voltage;
-    GtkWidget *fan;
-    GtkWidget *perf_level_current;
-    GList *temp_rows;            /* list of CtkAmdTempRow* */
-
-    /* power management controls */
-    GtkWidget *perf_level_combo;
-    GtkWidget *profile_combo;
-    GList *profiles;             /* AmdPowerProfile* */
-    GtkWidget *power_cap_spin;
-    GtkWidget *sclk_combo;
-    GtkWidget *mclk_combo;
-    GtkWidget *manual_box;
-
-    gboolean updating;           /* suppress signal handlers */
+    /* live values */
+    GtkWidget *gpu_utilization;
+    GtkWidget *mem_utilization;
+    GtkWidget *memory_used;
+    GtkWidget *displays;
 };
 
 struct _CtkAmdGpuClass

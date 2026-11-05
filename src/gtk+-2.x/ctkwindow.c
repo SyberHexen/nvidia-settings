@@ -75,6 +75,7 @@
 #include "amdgpu-sysfs.h"
 #include "ctkamdgpu.h"
 #include "ctkamdthermal.h"
+#include "ctkamdpowermizer.h"
 #include "ctkamddisplay.h"
 #include "ctkprime.h"
 
@@ -1861,6 +1862,17 @@ static void add_amd_gpu_pages(CtkWindow *ctk_window,
                                                  CTK_AMD_THERMAL(widget)),
                      ctk_window, &entry->iter, NULL, "Thermal Settings", NULL,
                      ctk_amd_thermal_start_timer, ctk_amd_thermal_stop_timer);
+        }
+
+        /* PowerMizer: clocks, DPM levels and power management */
+        widget = ctk_amd_powermizer_new(gpu, ctk_window->ctk_config);
+        if (widget) {
+            add_page(widget,
+                     ctk_amd_powermizer_create_help(tag_table,
+                                                    CTK_AMD_POWERMIZER(widget)),
+                     ctk_window, &entry->iter, NULL, "PowerMizer", NULL,
+                     ctk_amd_powermizer_start_timer,
+                     ctk_amd_powermizer_stop_timer);
         }
 
         if (data->dpy) {
