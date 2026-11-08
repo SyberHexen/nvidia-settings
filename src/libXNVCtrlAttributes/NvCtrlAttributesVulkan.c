@@ -266,7 +266,7 @@ Bool NvCtrlInitVkAttributes (NvCtrlAttributePrivateHandle *h)
     VkResult res;
 
     /* Check parameters */
-    if ( !h || !h->dpy || h->target_type != GPU_TARGET ) {
+    if ( !h || h->target_type != GPU_TARGET ) {
         return False;
     }
 
@@ -386,7 +386,7 @@ ReturnStatus NvCtrlVkGetVoidAttribute(const NvCtrlAttributePrivateHandle *h,
 
 
     /* Validate */
-    if (!h || !h->dpy || h->target_type != GPU_TARGET) {
+    if (!h || h->target_type != GPU_TARGET) {
         return NvCtrlBadHandle;
     }
     if (!h->vulkan || !__libVk) {
