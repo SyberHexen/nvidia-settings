@@ -1720,6 +1720,12 @@ void ctk_glx_probe_info(GtkWidget *widget)
 
     }
 
+    /* Without an NVIDIA X screen (PRIME, Wayland) the page belongs to a GPU */
+    if (!gpu_target &&
+        ctrl_target->targetTypeInfo->nvctrl == GPU_TARGET) {
+        gpu_target = ctrl_target;
+    }
+
     ret = NvCtrlGetStringAttribute(gpu_target,
                                    NV_CTRL_STRING_VK_API_VERSION,
                                    &vk_api_version);

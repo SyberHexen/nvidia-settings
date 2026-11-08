@@ -369,10 +369,10 @@ ifdef BUILD_WAYLANDLIB
 $(eval $(call DEBUG_INFO_RULES, $(WAYLANDLIB)))
 $(WAYLANDLIB).unstripped: $(WAYLAND_OBJS)
 	$(call quiet_cmd,LINK) -shared $(CFLAGS) $(LDFLAGS)  $(BIN_LDFLAGS) \
-	    $(LIBS) $(WAYLAND_LIBS) \
 	    -Wl,--unresolved-symbols=ignore-all -o $@ \
 	    -Wl,-soname -Wl,$(WAYLANDLIB_SONAME) \
-	    $(WAYLAND_OBJS)
+	    $(WAYLAND_OBJS) \
+	    $(LIBS) $(WAYLAND_LIBS)
 
 endif
 
