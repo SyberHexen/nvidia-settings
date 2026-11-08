@@ -806,14 +806,73 @@ gchar *dc_connector_state_signature(void)
 }
 
 
+/*
+ * The aspect ratio a resolution is sold as: 1366x768 is "16:9" and
+ * 3440x1440 "21:9", not their exact reduced fractions.
+ */
+gchar *dc_aspect_ratio(guint width, guint height)
+{
+    static const struct { const gchar *name; gdouble lo, hi; } names[] = {
+        { "1:1",   1.00,  1.00  },
+        { "5:4",   1.25,  1.25  },
+        { "4:3",   1.333, 1.334 },
+        { "3:2",   1.50,  1.50  },
+        { "16:10", 1.60,  1.60  },
+        { "5:3",   1.666, 1.667 },
+        { "16:9",  1.77,  1.79  },   /* incl. 1360x768, 1366x768 */
+        { "17:9",  1.89,  1.90  },   /* DCI 4K: 4096x2160 */
+        { "2:1",   2.00,  2.00  },
+        { "21:9",  2.33,  2.40  },   /* 2560x1080, 3440x1440, 3840x1600 */
+        { "32:10", 3.20,  3.20  },
+        { "32:9",  3.55,  3.56  },
+    };
+    gdouble r;
+    guint a, b, t, i;
+
+    if (!width || !height) {
+        return NULL;
+    }
+    r = (gdouble) width / height;
+    for (i = 0; i < G_N_ELEMENTS(names); i++) {
+        if (r >= names[i].lo - 0.005 && r <= names[i].hi + 0.005) {
+            return g_strdup(names[i].name);
+        }
+    }
+
+    /* Anything else: the reduced fraction if it is short, else x:1 */
+    for (a = width, b = height; b; t = a % b, a = b, b = t);
+    if (width / a <= 32 && height / a <= 32) {
+        return g_strdup_printf("%u:%u", width / a, height / a);
+    }
+    return g_strdup_printf("%.2f:1", r);
+}
+
+
+/* "1920x1080 (16:9)" */
+gchar *dc_resolution_string(guint width, guint height, gboolean interlaced)
+{
+    gchar *aspect = dc_aspect_ratio(width, height);
+    gchar *s = aspect
+        ? g_strdup_printf("%ux%u%s (%s)", width, height,
+                          interlaced ? "i" : "", aspect)
+        : g_strdup_printf("%ux%u%s", width, height, interlaced ? "i" : "");
+
+    g_free(aspect);
+    return s;
+}
+
+
 gchar *dc_mode_string(const DcMode *m)
 {
-    if (m->refresh > 0) {
-        return g_strdup_printf("%ux%u%s @ %.2f Hz", m->width, m->height,
-                               m->interlaced ? "i" : "", m->refresh);
+    gchar *res = dc_resolution_string(m->width, m->height, m->interlaced);
+    gchar *s;
+
+    if (m->refresh <= 0) {
+        return res;
     }
-    return g_strdup_printf("%ux%u%s", m->width, m->height,
-                           m->interlaced ? "i" : "");
+    s = g_strdup_printf("%s @ %.2f Hz", res, m->refresh);
+    g_free(res);
+    return s;
 }
 
 
