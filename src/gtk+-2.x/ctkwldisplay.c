@@ -270,8 +270,8 @@ static void fill_modes(CtkWlDisplay *page, const DcConnector *c)
                 g_string_append(rates, " +");
             }
         }
-        res = g_strdup_printf("%ux%u%s", first->width, first->height,
-                              first->interlaced ? "i" : "");
+        res = dc_resolution_string(first->width, first->height,
+                                   first->interlaced);
         gtk_list_store_append(page->mode_store, &iter);
         gtk_list_store_set(page->mode_store, &iter,
                            MODE_COL_RESOLUTION, res,
@@ -670,11 +670,13 @@ static void fill_resolutions(CtkWlDisplay *page, const DcOutputMode *select)
 
     for (i = 0; i < (gint) page->resolutions->len; i++) {
         const DcMode *r = &g_array_index(page->resolutions, DcMode, i);
-        gchar *text = g_strdup_printf("%ux%u%s%s", r->width, r->height,
-                                      r->interlaced ? "i" : "",
-                                      r->preferred ? " (preferred)" : "");
+        gchar *res = dc_resolution_string(r->width, r->height,
+                                          r->interlaced);
+        gchar *text = g_strdup_printf("%s%s", res,
+                                      r->preferred ? ", preferred" : "");
         ctk_combo_box_text_append_text(page->resolution_combo, text);
         g_free(text);
+        g_free(res);
         if (select && r->width == select->width &&
             r->height == select->height &&
             r->interlaced == select->interlaced) {

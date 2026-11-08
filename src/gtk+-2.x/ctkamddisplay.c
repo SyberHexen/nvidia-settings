@@ -1385,12 +1385,13 @@ void ctk_amd_display_refresh(CtkAmdDisplay *page)
 
     /* current mode label */
     if (cur && ci) {
-        gchar *s = g_strdup_printf("%ux%u%s @ %.2f Hz, +%d+%d",
-                                   cur->width, cur->height,
-                                   (cur->modeFlags & RR_Interlace) ? "i" : "",
+        gchar *res = dc_resolution_string(cur->width, cur->height,
+                                          (cur->modeFlags & RR_Interlace) != 0);
+        gchar *s = g_strdup_printf("%s @ %.2f Hz, +%d+%d", res,
                                    mode_refresh(cur), ci->x, ci->y);
         gtk_label_set_text(GTK_LABEL(page->current_mode_label), s);
         g_free(s);
+        g_free(res);
     } else {
         gtk_label_set_text(GTK_LABEL(page->current_mode_label), "Disabled");
     }
@@ -1434,8 +1435,8 @@ void ctk_amd_display_refresh(CtkAmdDisplay *page)
     for (i = 0; i < (gint) page->resolutions->len; i++) {
         CtkAmdResolution *r =
             &g_array_index(page->resolutions, CtkAmdResolution, i);
-        gchar *txt = g_strdup_printf("%ux%u%s", r->width, r->height,
-                                     r->interlaced ? " (interlaced)" : "");
+        gchar *txt = dc_resolution_string(r->width, r->height,
+                                          r->interlaced);
         ctk_combo_box_text_append_text(page->resolution_combo, txt);
         g_free(txt);
 
