@@ -104,7 +104,10 @@ void           dc_connector_list_free(GList *list);
  * on or off.  Reads sysfs only: cheap, and never wakes a GPU. */
 gchar         *dc_connector_state_signature(void);
 
-/* "1920x1080 @ 60.00 Hz" */
+/* "16:9"; "1920x1080 (16:9)"; "1920x1080 (16:9) @ 60.00 Hz" */
+gchar         *dc_aspect_ratio(guint width, guint height);
+gchar         *dc_resolution_string(guint width, guint height,
+                                    gboolean interlaced);
 gchar         *dc_mode_string(const DcMode *m);
 
 /* "DP-1 - (HISENSE)" */
