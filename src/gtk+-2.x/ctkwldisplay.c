@@ -24,6 +24,7 @@
 #include <gtk/gtk.h>
 
 #include "ctkwldisplay.h"
+#include "ctkwlcolor.h"
 #include "ctkbanner.h"
 #include "ctkhelp.h"
 #include "ctkutils.h"
@@ -55,7 +56,28 @@ static const char *__colorspace_help =
 "The colorimetry signalled to the monitor.  BT2020 variants are used for "
 "HDR output.";
 static const char *__rgb_help =
-"Full (0-255) or Limited (16-235) RGB range.";
+"The RGB range setting of the connector: Full (0-255), Limited (16-235), or "
+"Automatic, where the driver sends limited range for TV modes (such as "
+"1080p or 4K) and full range otherwise.";
+static const char *__format_help =
+"The pixel encoding setting of the connector: RGB or YCbCr, or Automatic, "
+"where the driver chooses.";
+static const char *__rgb_control_help =
+"Selects the RGB range sent to the display.  A display that expects a "
+"different range than it receives looks washed out (grey blacks) or too "
+"dark (crushed shadows).  Automatic lets the driver choose: limited range "
+"for TV modes, full range otherwise.  Choose Full for most monitors, and "
+"for TVs set to full range (often called HDMI Black Level, RGB Range or "
+"HDMI Dynamic Range).";
+static const char *__format_control_help =
+"Selects how pixels are encoded on the link: RGB, or YCbCr with full "
+"(4:4:4) or reduced (4:2:2, 4:2:0) color resolution.  RGB 4:4:4 gives the "
+"sharpest text; YCbCr 4:2:0 lets some displays run modes that otherwise "
+"exceed the link's bandwidth.";
+static const char *__controls_apply_help =
+"Asks the compositor to apply the color range and color space, and to "
+"remember them.  You will be asked to confirm the change; if you do not "
+"confirm in time the previous setting is restored.";
 static const char *__hdr_help =
 "Whether the compositor is sending HDR metadata to the monitor, which "
 "means HDR output is enabled.";
@@ -325,6 +347,7 @@ void ctk_wl_display_refresh(CtkWlDisplay *page)
     }
     set_label(page->colorspace_label, c->colorspace);
     set_label(page->rgb_label, c->rgb_range);
+    set_label(page->format_label, c->color_format);
     set_bool_label(page->hdr_label, c->hdr_metadata, "Enabled", "Disabled");
 
     s = modes_signature(c);
@@ -422,6 +445,11 @@ static void page_destroyed(GObject *obj, gpointer data)
     if (page->scales) g_array_free(page->scales, TRUE);
     if (page->vrr_values) g_array_free(page->vrr_values, TRUE);
     page->resolutions = page->rates = page->scales = page->vrr_values = NULL;
+    if (page->rgb_values) g_array_free(page->rgb_values, TRUE);
+    if (page->format_values) g_array_free(page->format_values, TRUE);
+    page->rgb_values = page->format_values = NULL;
+    g_free(page->cc_output);
+    page->cc_output = NULL;
 }
 
 
@@ -746,6 +774,120 @@ static void update_sensitivity(CtkWlDisplay *page)
 }
 
 
+typedef struct {
+    gint value;
+    const gchar *label;
+} Choice;
+
+static const Choice rgb_choices[] = {
+    { DC_RGB_RANGE_AUTO,    "Automatic" },
+    { DC_RGB_RANGE_FULL,    "Full (0-255)" },
+    { DC_RGB_RANGE_LIMITED, "Limited (16-235)" },
+};
+
+static const Choice format_choices[] = {
+    { DC_COLOR_FORMAT_AUTO,     "Automatic" },
+    { DC_COLOR_FORMAT_RGB,      "RGB" },
+    { DC_COLOR_FORMAT_YCBCR444, "YCbCr 4:4:4" },
+    { DC_COLOR_FORMAT_YCBCR422, "YCbCr 4:2:2" },
+    { DC_COLOR_FORMAT_YCBCR420, "YCbCr 4:2:0" },
+};
+
+
+static void fill_choice(CtkWlDisplay *page, GtkWidget *combo, GArray *values,
+                        const Choice *choices, gint n, guint mask,
+                        gint current)
+{
+    gint i, active = -1;
+
+    page->updating = TRUE;
+    combo_clear(combo);
+    g_array_set_size(values, 0);
+    for (i = 0; i < n; i++) {
+        if (!(mask & (1u << choices[i].value))) continue;
+        g_array_append_val(values, choices[i].value);
+        ctk_combo_box_text_append_text(combo, choices[i].label);
+        if (choices[i].value == current) {
+            active = values->len - 1;
+        }
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(combo), active);
+    gtk_widget_set_sensitive(combo, values->len > 1);
+    page->updating = FALSE;
+}
+
+
+static gint selected_choice(GtkWidget *combo, GArray *values)
+{
+    gint i = gtk_combo_box_get_active(GTK_COMBO_BOX(combo));
+    return (i >= 0 && i < (gint) values->len)
+           ? g_array_index(values, gint, i) : 0;
+}
+
+
+static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
+{
+    gboolean any;
+
+    if (!page->controls_table) {
+        return;
+    }
+    fill_choice(page, page->rgb_combo, page->rgb_values, rgb_choices,
+                G_N_ELEMENTS(rgb_choices), o ? o->rgb_ranges : 0,
+                o ? o->rgb_range : 0);
+    fill_choice(page, page->format_combo, page->format_values,
+                format_choices, G_N_ELEMENTS(format_choices),
+                o ? o->color_formats : 0, o ? o->color_format : 0);
+
+    any = o && (o->rgb_ranges || o->color_formats);
+    if (any) {
+        gtk_label_set_text(GTK_LABEL(page->controls_status),
+                           g_object_get_data(G_OBJECT(page), "status-text"));
+    } else {
+        gchar *s = g_strdup_printf("%s does not offer these settings for "
+                                   "this display.  On Cinnamon they need "
+                                   "Muffin with color range support.",
+                                   page->backend->name);
+        gtk_label_set_text(GTK_LABEL(page->controls_status), s);
+        g_free(s);
+    }
+    gtk_widget_set_sensitive(page->controls_apply, any);
+    gtk_widget_set_sensitive(page->controls_reset, any);
+}
+
+
+/* (Re)build the Color Correction tab for the output the compositor shows
+ * this display on */
+static void update_color_correction(CtkWlDisplay *page)
+{
+    const gchar *name = page->output ? page->output->name : NULL;
+    GList *children, *l;
+    GtkWidget *w;
+
+    if (!page->cc_box || (page->cc_output && !name) ||
+        (name && g_strcmp0(name, page->cc_output) == 0)) {
+        return;
+    }
+    children = gtk_container_get_children(GTK_CONTAINER(page->cc_box));
+    for (l = children; l; l = l->next) {
+        gtk_widget_destroy(l->data);
+    }
+    g_list_free(children);
+
+    g_free(page->cc_output);
+    page->cc_output = g_strdup(name);
+    if (name) {
+        w = ctk_wl_color_correction_new(page->backend, name,
+                                        page->ctk_config);
+    } else {
+        w = gtk_label_new("The compositor does not list this display.");
+        gtk_misc_set_alignment(GTK_MISC(w), 0.0f, 0.0f);
+    }
+    gtk_box_pack_start(GTK_BOX(page->cc_box), w, FALSE, FALSE, 0);
+    gtk_widget_show_all(page->cc_box);
+}
+
+
 /* Read the compositor's current state into the controls */
 static void load_config(CtkWlDisplay *page)
 {
@@ -774,6 +916,8 @@ static void load_config(CtkWlDisplay *page)
         g_clear_error(&error);
         gtk_widget_hide(page->config_table);
         update_sensitivity(page);
+        fill_color_controls(page, NULL);
+        update_color_correction(page);
         return;
     }
     gtk_widget_show(page->config_table);
@@ -798,6 +942,8 @@ static void load_config(CtkWlDisplay *page)
     fill_scales(page, mode, o->scale);
     fill_vrr(page, o);
     update_sensitivity(page);
+    fill_color_controls(page, o);
+    update_color_correction(page);
 }
 
 
@@ -1039,29 +1185,15 @@ static GList *build_config(CtkWlDisplay *page, GList *current,
 }
 
 
-static void apply_clicked(GtkButton *button, gpointer data)
+/* Apply 'config', confirm it (or let the desktop do so) and save it.
+ * Frees both lists. */
+static void run_apply(CtkWlDisplay *page, GList *before, GList *config,
+                      GtkWidget *button)
 {
-    CtkWlDisplay *page = data;
     DcBackend *b = page->backend;
     GError *error = NULL;
-    GList *before, *config;
 
-    before = b->query(b, &error);
-    if (!before) {
-        error_dialog(page, "Unable to read the display configuration", error);
-        g_clear_error(&error);
-        return;
-    }
-    config = build_config(page, before, &error);
-    if (!config) {
-        error_dialog(page, "Unable to apply the display configuration",
-                     error);
-        g_clear_error(&error);
-        dc_output_list_free(before);
-        return;
-    }
-
-    gtk_widget_set_sensitive(page->apply_button, FALSE);
+    gtk_widget_set_sensitive(button, FALSE);
     if (b->caps & DC_CAP_COMPOSITOR_CONFIRMS) {
         /* The desktop shows its own keep/revert prompt */
         if (!dc_backend_apply(b, config, TRUE, &error)) {
@@ -1094,6 +1226,78 @@ static void apply_clicked(GtkButton *button, gpointer data)
     dc_output_list_free(before);
     mark_dirty(page, FALSE);
     load_config(page);
+}
+
+
+static void apply_clicked(GtkButton *button, gpointer data)
+{
+    CtkWlDisplay *page = data;
+    DcBackend *b = page->backend;
+    GError *error = NULL;
+    GList *before, *config;
+
+    before = b->query(b, &error);
+    if (!before) {
+        error_dialog(page, "Unable to read the display configuration", error);
+        g_clear_error(&error);
+        return;
+    }
+    config = build_config(page, before, &error);
+    if (!config) {
+        error_dialog(page, "Unable to apply the display configuration",
+                     error);
+        g_clear_error(&error);
+        dc_output_list_free(before);
+        return;
+    }
+    run_apply(page, before, config, page->apply_button);
+}
+
+
+/* The Controls tab applies only its own settings, on top of the current
+ * configuration, so changes pending on the Information tab stay pending */
+static void controls_apply_clicked(GtkButton *button, gpointer data)
+{
+    CtkWlDisplay *page = data;
+    DcBackend *b = page->backend;
+    GError *error = NULL;
+    GList *before, *config;
+    DcOutput *o;
+    gint v;
+
+    before = b->query(b, &error);
+    if (!before) {
+        error_dialog(page, "Unable to read the display configuration", error);
+        g_clear_error(&error);
+        return;
+    }
+    config = dc_output_list_copy(before);
+    o = find_output(page, config);
+    if (!o) {
+        g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                            "The compositor no longer lists this display.");
+        error_dialog(page, "Unable to apply the color settings", error);
+        g_clear_error(&error);
+        dc_output_list_free(config);
+        dc_output_list_free(before);
+        return;
+    }
+    if ((v = selected_choice(page->rgb_combo, page->rgb_values))) {
+        o->rgb_range = v;
+    }
+    if ((v = selected_choice(page->format_combo, page->format_values))) {
+        o->color_format = v;
+    }
+    run_apply(page, before, config, page->controls_apply);
+}
+
+
+static void controls_changed(GtkWidget *w, gpointer data)
+{
+    CtkWlDisplay *page = data;
+
+    if (page->updating) return;
+    mark_dirty(page, TRUE);
 }
 
 
@@ -1263,6 +1467,65 @@ static void build_config_controls(CtkWlDisplay *page, GtkWidget *vbox)
 }
 
 
+static void build_color_controls(CtkWlDisplay *page, GtkWidget *vbox)
+{
+    GtkWidget *table, *hbox;
+    gint row = 0;
+
+    page->rgb_values = g_array_new(FALSE, FALSE, sizeof(gint));
+    page->format_values = g_array_new(FALSE, FALSE, sizeof(gint));
+
+    table = ctk_section_table_new(vbox, "Color Controls");
+    page->controls_table = table;
+    page->rgb_combo = ctk_combo_box_text_new();
+    config_row(page, table, &row, "Color Range:", page->rgb_combo,
+               __rgb_control_help);
+    page->format_combo = ctk_combo_box_text_new();
+    config_row(page, table, &row, "Color Space:", page->format_combo,
+               __format_control_help);
+    g_signal_connect(G_OBJECT(page->rgb_combo), "changed",
+                     G_CALLBACK(controls_changed), page);
+    g_signal_connect(G_OBJECT(page->format_combo), "changed",
+                     G_CALLBACK(controls_changed), page);
+
+    hbox = gtk_hbox_new(FALSE, 5);
+    page->controls_status = gtk_label_new(NULL);
+    gtk_label_set_line_wrap(GTK_LABEL(page->controls_status), TRUE);
+    gtk_misc_set_alignment(GTK_MISC(page->controls_status), 0.0f, 0.5f);
+    gtk_box_pack_start(GTK_BOX(hbox), page->controls_status, TRUE, TRUE, 5);
+    page->controls_apply = gtk_button_new_with_label("Apply");
+    ctk_config_set_tooltip(page->ctk_config, page->controls_apply,
+                           __controls_apply_help);
+    g_signal_connect(G_OBJECT(page->controls_apply), "clicked",
+                     G_CALLBACK(controls_apply_clicked), page);
+    page->controls_reset = gtk_button_new_with_label("Reset");
+    ctk_config_set_tooltip(page->ctk_config, page->controls_reset,
+                           __reset_help);
+    g_signal_connect(G_OBJECT(page->controls_reset), "clicked",
+                     G_CALLBACK(reset_clicked), page);
+    gtk_box_pack_end(GTK_BOX(hbox), page->controls_apply, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(hbox), page->controls_reset, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 5);
+}
+
+
+static GtkWidget *tab_box(GtkWidget *notebook, const gchar *title)
+{
+    GtkWidget *vbox = gtk_vbox_new(FALSE, 5);
+    GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
+
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 5);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(sw),
+                                        GTK_SHADOW_NONE);
+    ctk_scrolled_window_add(GTK_SCROLLED_WINDOW(sw), vbox);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), sw,
+                             gtk_label_new(title));
+    return vbox;
+}
+
+
 /* ---- construction ------------------------------------------------------- */
 
 GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
@@ -1271,7 +1534,8 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
     GObject *object;
     CtkWlDisplay *page;
     DcConnector *c;
-    GtkWidget *banner, *vbox, *sw, *table, *view, *w, *hbox, *button;
+    GtkWidget *banner, *vbox, *cvbox, *notebook, *table, *view, *w, *hbox;
+    GtkWidget *button;
     GtkCellRenderer *renderer;
     const gchar *tool;
     gchar *s;
@@ -1296,15 +1560,20 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
     banner = ctk_banner_image_new(BANNER_ARTWORK_BLANK);
     gtk_box_pack_start(GTK_BOX(page), banner, FALSE, FALSE, 0);
 
-    vbox = gtk_vbox_new(FALSE, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(vbox), 5);
-    sw = gtk_scrolled_window_new(NULL, NULL);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw),
-                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(sw),
-                                        GTK_SHADOW_NONE);
-    ctk_scrolled_window_add(GTK_SCROLLED_WINDOW(sw), vbox);
-    gtk_box_pack_start(GTK_BOX(page), sw, TRUE, TRUE, 0);
+    /* Tabs as on the X display device page */
+    notebook = gtk_notebook_new();
+    gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
+    gtk_box_pack_start(GTK_BOX(page), notebook, TRUE, TRUE, 0);
+    vbox = tab_box(notebook, "Information");
+    cvbox = tab_box(notebook, "Controls");
+
+    page->backend = dc_backend();
+    if (page->backend) {
+        build_color_controls(page, cvbox);
+        if (page->backend->get_gamma && page->backend->set_gamma) {
+            page->cc_box = tab_box(notebook, "Color Correction");
+        }
+    }
 
     /* --- information --- */
     table = ctk_section_table_new(vbox, "Display Device Information");
@@ -1337,11 +1606,19 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
     page->vrr_label = info_row(page, table, &row, "Variable Refresh Rate:",
                                NULL, __vrr_help);
 
-    /* --- color --- */
+    /* --- color signal, on the Controls tab --- */
     if (c->max_bpc >= 0 || c->colorspace || c->rgb_range ||
-        c->hdr_metadata >= 0) {
-        table = ctk_section_table_new(vbox, "Color");
+        c->color_format || c->hdr_metadata >= 0) {
+        table = ctk_section_table_new(cvbox, "Current Signal");
         row = 0;
+        if (c->rgb_range) {
+            page->rgb_label = info_row(page, table, &row, "Color Range:",
+                                       NULL, __rgb_help);
+        }
+        if (c->color_format) {
+            page->format_label = info_row(page, table, &row, "Color Space:",
+                                          NULL, __format_help);
+        }
         if (c->max_bpc >= 0) {
             page->bpc_label = info_row(page, table, &row,
                                        "Maximum Color Depth (bpc):", NULL,
@@ -1349,12 +1626,8 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
         }
         if (c->colorspace) {
             page->colorspace_label = info_row(page, table, &row,
-                                              "Colorspace:", NULL,
+                                              "Colorimetry:", NULL,
                                               __colorspace_help);
-        }
-        if (c->rgb_range) {
-            page->rgb_label = info_row(page, table, &row, "RGB Range:", NULL,
-                                       __rgb_help);
         }
         if (c->hdr_metadata >= 0) {
             page->hdr_label = info_row(page, table, &row, "HDR:", NULL,
@@ -1389,7 +1662,6 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
     /* --- configuration --- */
     page->kms_info = c;
     page->unique_name = connector_name_unique(card, connector);
-    page->backend = dc_backend();
     if (page->backend) {
         build_config_controls(page, vbox);
     }
@@ -1453,13 +1725,28 @@ GtkTextBuffer *ctk_wl_display_create_help(GtkTextTagTable *table,
         ctk_help_heading(b, &i, "Maximum Color Depth");
         ctk_help_para(b, &i, "%s", __bpc_help);
     }
-    if (page->colorspace_label) {
-        ctk_help_heading(b, &i, "Colorspace");
-        ctk_help_para(b, &i, "%s", __colorspace_help);
+    if (page->controls_table) {
+        ctk_help_heading(b, &i, "Color Controls");
+        ctk_help_para(b, &i, "These are on the Controls tab, and are "
+                      "applied through %s.", page->backend->name);
+        ctk_help_term(b, &i, "Color Range");
+        ctk_help_para(b, &i, "%s", __rgb_control_help);
+        ctk_help_term(b, &i, "Color Space");
+        ctk_help_para(b, &i, "%s", __format_control_help);
+        ctk_help_term(b, &i, "Apply");
+        ctk_help_para(b, &i, "%s", __controls_apply_help);
     }
     if (page->rgb_label) {
-        ctk_help_heading(b, &i, "RGB Range");
+        ctk_help_heading(b, &i, "Current Color Range");
         ctk_help_para(b, &i, "%s", __rgb_help);
+    }
+    if (page->format_label) {
+        ctk_help_heading(b, &i, "Current Color Space");
+        ctk_help_para(b, &i, "%s", __format_help);
+    }
+    if (page->colorspace_label) {
+        ctk_help_heading(b, &i, "Colorimetry");
+        ctk_help_para(b, &i, "%s", __colorspace_help);
     }
     if (page->hdr_label) {
         ctk_help_heading(b, &i, "HDR");
@@ -1499,6 +1786,9 @@ GtkTextBuffer *ctk_wl_display_create_help(GtkTextTagTable *table,
         ctk_help_para(b, &i, "%s", __apply_help);
         ctk_help_term(b, &i, "Reset");
         ctk_help_para(b, &i, "%s", __reset_help);
+    }
+    if (page->cc_box) {
+        ctk_wl_color_correction_help(b, &i);
     }
     ctk_help_heading(b, &i, "Desktop Display Settings");
     ctk_help_para(b, &i, "%s", __settings_help);

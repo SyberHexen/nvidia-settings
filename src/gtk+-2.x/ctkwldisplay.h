@@ -56,6 +56,7 @@ struct _CtkWlDisplay
     GtkWidget *bpc_label;
     GtkWidget *colorspace_label;
     GtkWidget *rgb_label;
+    GtkWidget *format_label;
     GtkWidget *hdr_label;
     GtkListStore *mode_store;
     gchar *modes_sig;            /* detects mode list changes */
@@ -86,6 +87,20 @@ struct _CtkWlDisplay
     GArray *rates;               /* gdouble, per rate combo row */
     GArray *scales;              /* gdouble, per scale combo row */
     GArray *vrr_values;          /* gint (DcVrr), per VRR combo row */
+
+    /* Controls tab: color range and color space (pixel encoding) */
+    GtkWidget *controls_table;
+    GtkWidget *controls_status;
+    GtkWidget *rgb_combo;
+    GtkWidget *format_combo;
+    GtkWidget *controls_apply;
+    GtkWidget *controls_reset;
+    GArray *rgb_values;          /* gint (DcRgbRange), per combo row */
+    GArray *format_values;       /* gint (DcColorFormat), per combo row */
+
+    /* Color Correction tab */
+    GtkWidget *cc_box;
+    gchar *cc_output;            /* compositor output it was built for */
 };
 
 struct _CtkWlDisplayClass

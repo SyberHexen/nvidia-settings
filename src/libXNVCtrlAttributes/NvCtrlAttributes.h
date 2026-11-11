@@ -199,6 +199,31 @@ struct _CtrlSystemList {
 #define CONTRAST_MIN            -1.0
 #define CONTRAST_DEFAULT        0.0
 
+/*
+ * Gamma ramp computation shared by the XF86VidMode and RandR backends, and by
+ * the Wayland color correction page, which sends the ramps to the
+ * compositor.
+ */
+
+typedef struct {
+    float brightness[3];
+    float contrast[3];
+    float gamma[3];
+} NvCtrlGammaInput;
+
+void NvCtrlInitGammaInputStruct(NvCtrlGammaInput *pGammaInput);
+
+void NvCtrlUpdateGammaRamp(const NvCtrlGammaInput *pGammaInput,
+                           int gammaRampSize,
+                           unsigned short *gammaRamp[3],
+                           unsigned int bitmask);
+
+void NvCtrlAssignGammaInput(NvCtrlGammaInput *pGammaInput,
+                            const float inContrast[3],
+                            const float inBrightness[3],
+                            const float inGamma[3],
+                            const unsigned int bitmask);
+
 
 /*
  * Attribute types used to know how to access each attribute - for example, to

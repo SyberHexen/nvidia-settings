@@ -45,12 +45,18 @@ G_BEGIN_DECLS
 typedef struct _CtkCurve       CtkCurve;
 typedef struct _CtkCurveClass  CtkCurveClass;
 
+/* Supplies the ramp of one channel (RED_CHANNEL, ...) to draw */
+typedef void (*CtkCurveRampFunc)(gpointer data, gint channel,
+                                 gushort **lut, gint *n_lut_entries);
+
 struct _CtkCurve
 {
     GtkDrawingArea parent;
 
     CtrlTarget *ctrl_target;
     GtkWidget *color;
+    CtkCurveRampFunc ramp_func;   /* used instead of ctrl_target if set */
+    gpointer ramp_data;
 
 #ifdef CTK_GTK3
     cairo_surface_t *c_surface;
@@ -76,6 +82,7 @@ struct _CtkCurveClass
 
 GType       ctk_curve_get_type  (void) G_GNUC_CONST;
 GtkWidget*  ctk_curve_new       (CtrlTarget *, GtkWidget *);
+GtkWidget*  ctk_curve_new_with_ramps(CtkCurveRampFunc, gpointer);
 void        ctk_curve_color_changed(GtkWidget *);
 
 G_END_DECLS
