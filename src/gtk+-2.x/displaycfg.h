@@ -106,6 +106,15 @@ void           dc_connector_list_free(GList *list);
  * on or off.  Reads sysfs only: cheap, and never wakes a GPU. */
 gchar         *dc_connector_state_signature(void);
 
+/* The color formats (bit mask of 1 << DcColorFormat) the monitor's EDID
+ * allows for 'mode', judged as the kernel does: YCbCr 4:4:4 and 4:2:2 if it
+ * supports them at all, YCbCr 4:2:0 only for the progressive modes the
+ * CTA-861 4:2:0 data blocks list (in CTA extensions or embedded in
+ * DisplayID).  Automatic and RGB are always allowed; all formats if there is
+ * no EDID. */
+guint          dc_edid_color_formats(const guchar *edid, gsize len,
+                                     const DcMode *mode);
+
 /* "16:9"; "1920x1080 (16:9)"; "1920x1080 (16:9) @ 60.00 Hz" */
 gchar         *dc_aspect_ratio(guint width, guint height);
 gchar         *dc_resolution_string(guint width, guint height,

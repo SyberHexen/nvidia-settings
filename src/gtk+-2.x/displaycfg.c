@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -813,6 +814,211 @@ gchar *dc_connector_state_signature(void)
  * The aspect ratio a resolution is sold as: 1366x768 is "16:9" and
  * 3440x1440 "21:9", not their exact reduced fractions.
  */
+/* ---- EDID color formats ------------------------------------------------- */
+
+/* Every progressive CTA-861 video format (VIC) of at least 480 lines, with
+ * its exact refresh rate in mHz.  Generated from libdisplay-info 0.3.0's
+ * di_cta_video_format_from_vic() (CTA-861-I); 4:2:0 data blocks refer to
+ * modes by these numbers. */
+static const struct {
+    guint8 vic;
+    guint16 width, height;
+    guint32 mhz;
+} cta_vics[] = {
+    {   1,   640,  480,  59940 },    {   2,   720,  480,  59940 },    {   3,   720,  480,  59940 },
+    {   4,  1280,  720,  60000 },    {  14,  1440,  480,  59940 },    {  15,  1440,  480,  59940 },
+    {  16,  1920, 1080,  60000 },    {  17,   720,  576,  50000 },    {  18,   720,  576,  50000 },
+    {  19,  1280,  720,  50000 },    {  29,  1440,  576,  50000 },    {  30,  1440,  576,  50000 },
+    {  31,  1920, 1080,  50000 },    {  32,  1920, 1080,  24000 },    {  33,  1920, 1080,  25000 },
+    {  34,  1920, 1080,  30000 },    {  35,  2880,  480,  59940 },    {  36,  2880,  480,  59940 },
+    {  37,  2880,  576,  50000 },    {  38,  2880,  576,  50000 },    {  41,  1280,  720, 100000 },
+    {  42,   720,  576, 100000 },    {  43,   720,  576, 100000 },    {  47,  1280,  720, 120000 },
+    {  48,   720,  480, 119880 },    {  49,   720,  480, 119880 },    {  52,   720,  576, 200000 },
+    {  53,   720,  576, 200000 },    {  56,   720,  480, 239760 },    {  57,   720,  480, 239760 },
+    {  60,  1280,  720,  24000 },    {  61,  1280,  720,  25000 },    {  62,  1280,  720,  30000 },
+    {  63,  1920, 1080, 120000 },    {  64,  1920, 1080, 100000 },    {  65,  1280,  720,  24000 },
+    {  66,  1280,  720,  25000 },    {  67,  1280,  720,  30000 },    {  68,  1280,  720,  50000 },
+    {  69,  1280,  720,  60000 },    {  70,  1280,  720, 100000 },    {  71,  1280,  720, 120000 },
+    {  72,  1920, 1080,  24000 },    {  73,  1920, 1080,  25000 },    {  74,  1920, 1080,  30000 },
+    {  75,  1920, 1080,  50000 },    {  76,  1920, 1080,  60000 },    {  77,  1920, 1080, 100000 },
+    {  78,  1920, 1080, 120000 },    {  79,  1680,  720,  24000 },    {  80,  1680,  720,  25000 },
+    {  81,  1680,  720,  30000 },    {  82,  1680,  720,  50000 },    {  83,  1680,  720,  60000 },
+    {  84,  1680,  720, 100000 },    {  85,  1680,  720, 120000 },    {  86,  2560, 1080,  24000 },
+    {  87,  2560, 1080,  25000 },    {  88,  2560, 1080,  30000 },    {  89,  2560, 1080,  50000 },
+    {  90,  2560, 1080,  60000 },    {  91,  2560, 1080, 100000 },    {  92,  2560, 1080, 120000 },
+    {  93,  3840, 2160,  24000 },    {  94,  3840, 2160,  25000 },    {  95,  3840, 2160,  30000 },
+    {  96,  3840, 2160,  50000 },    {  97,  3840, 2160,  60000 },    {  98,  4096, 2160,  24000 },
+    {  99,  4096, 2160,  25000 },    { 100,  4096, 2160,  30000 },    { 101,  4096, 2160,  50000 },
+    { 102,  4096, 2160,  60000 },    { 103,  3840, 2160,  24000 },    { 104,  3840, 2160,  25000 },
+    { 105,  3840, 2160,  30000 },    { 106,  3840, 2160,  50000 },    { 107,  3840, 2160,  60000 },
+    { 108,  1280,  720,  48000 },    { 109,  1280,  720,  48000 },    { 110,  1680,  720,  48000 },
+    { 111,  1920, 1080,  48000 },    { 112,  1920, 1080,  48000 },    { 113,  2560, 1080,  48000 },
+    { 114,  3840, 2160,  48000 },    { 115,  4096, 2160,  48000 },    { 116,  3840, 2160,  48000 },
+    { 117,  3840, 2160, 100000 },    { 118,  3840, 2160, 120000 },    { 119,  3840, 2160, 100000 },
+    { 120,  3840, 2160, 120000 },    { 121,  5120, 2160,  24000 },    { 122,  5120, 2160,  25000 },
+    { 123,  5120, 2160,  30000 },    { 124,  5120, 2160,  48000 },    { 125,  5120, 2160,  50000 },
+    { 126,  5120, 2160,  60000 },    { 127,  5120, 2160, 100000 },    { 193,  5120, 2160, 120000 },
+    { 194,  7680, 4320,  24000 },    { 195,  7680, 4320,  25000 },    { 196,  7680, 4320,  30000 },
+    { 197,  7680, 4320,  48000 },    { 198,  7680, 4320,  50000 },    { 199,  7680, 4320,  60000 },
+    { 200,  7680, 4320, 100000 },    { 201,  7680, 4320, 120000 },    { 202,  7680, 4320,  24000 },
+    { 203,  7680, 4320,  25000 },    { 204,  7680, 4320,  30000 },    { 205,  7680, 4320,  48000 },
+    { 206,  7680, 4320,  50000 },    { 207,  7680, 4320,  60000 },    { 208,  7680, 4320, 100000 },
+    { 209,  7680, 4320, 120000 },    { 210, 10240, 4320,  24000 },    { 211, 10240, 4320,  25000 },
+    { 212, 10240, 4320,  30000 },    { 213, 10240, 4320,  48000 },    { 214, 10240, 4320,  50000 },
+    { 215, 10240, 4320,  60000 },    { 216, 10240, 4320, 100000 },    { 217, 10240, 4320, 120000 },
+    { 218,  4096, 2160, 100000 },    { 219,  4096, 2160, 120000 },
+};
+
+
+static gboolean vic_matches_mode(guint vic, const DcMode *mode)
+{
+    guint i;
+
+    if (!mode || mode->interlaced) return FALSE;
+    for (i = 0; i < G_N_ELEMENTS(cta_vics); i++) {
+        gdouble hz;
+
+        if (cta_vics[i].vic != vic) continue;
+        if (mode->width != cta_vics[i].width ||
+            mode->height != cta_vics[i].height) {
+            return FALSE;
+        }
+        /* A VIC covers both its integer rate and the 1000/1001 one */
+        hz = cta_vics[i].mhz / 1000.0;
+        return fabs(mode->refresh - hz) < 0.5 ||
+               fabs(mode->refresh - hz * 1000.0 / 1001.0) < 0.5 ||
+               fabs(mode->refresh - hz * 1001.0 / 1000.0) < 0.5;
+    }
+    return FALSE;
+}
+
+
+/* What the CTA-861 data blocks of an EDID say about YCbCr 4:2:0, gathered
+ * as the kernel does (drm_edid.c): the SVDs of all video data blocks in
+ * order, skipping invalid VICs, and the capability maps over the first 64 */
+typedef struct {
+    guint8 svds[64];
+    guint n_svds;
+    guint64 cmdb_map;
+    gboolean y420;           /* the mode can be sent as YCbCr 4:2:0 */
+    const DcMode *mode;
+} CtaState;
+
+
+static gboolean valid_vic(guint vic)
+{
+    return (vic >= 1 && vic <= 127) || (vic >= 193 && vic <= 219);
+}
+
+
+/* A collection of CTA-861 data blocks: from a CTA extension, or embedded in
+ * a DisplayID CTA data block */
+static void parse_cta_data_blocks(const guchar *p, guint len, CtaState *st)
+{
+    guint pos = 0;
+
+    while (pos < len) {
+        guint tag = p[pos] >> 5, l = p[pos] & 31, i;
+        const guchar *data = p + pos + 1;
+
+        if (pos + 1 + l > len) break;
+        if (tag == 2) {                           /* video data block */
+            for (i = 0; i < l; i++) {
+                guint v = data[i];
+                if (v >= 129 && v <= 192) v &= 0x7f;   /* native flag */
+                if (valid_vic(v) && st->n_svds < G_N_ELEMENTS(st->svds)) {
+                    st->svds[st->n_svds++] = v;
+                }
+            }
+        } else if (tag == 7 && l >= 1 && data[0] == 0x0e) {
+            /* 4:2:0 video data block: modes only sent as 4:2:0 */
+            for (i = 1; i < l; i++) {
+                st->y420 |= vic_matches_mode(data[i], st->mode);
+            }
+        } else if (tag == 7 && l >= 1 && data[0] == 0x0f) {
+            /* 4:2:0 capability map over the SVDs; empty means all */
+            if (l == 1) {
+                st->cmdb_map = G_MAXUINT64;
+            }
+            for (i = 1; i < l && i <= 8; i++) {
+                st->cmdb_map |= (guint64) data[i] << (8 * (i - 1));
+            }
+        }
+        pos += 1 + l;
+    }
+}
+
+
+/* The CTA data blocks embedded in a DisplayID extension block (0x70) */
+static void parse_displayid(const guchar *x, CtaState *st)
+{
+    guint end = MIN(5u + x[2], 127u), pos = 5;
+
+    while (pos + 3 <= end) {
+        guint tag = x[pos], l = x[pos + 2];
+
+        if (pos + 3 + l > end) break;
+        if (tag == 0x81) {                        /* CTA DisplayID block */
+            parse_cta_data_blocks(x + pos + 3, l, st);
+        }
+        pos += 3 + l;
+    }
+}
+
+
+guint dc_edid_color_formats(const guchar *edid, gsize len,
+                            const DcMode *mode)
+{
+    guint mask = (1u << DC_COLOR_FORMAT_AUTO) | (1u << DC_COLOR_FORMAT_RGB);
+    CtaState st = { .mode = mode };
+    guint blocks, b, i;
+
+    if (!edid || len < 128) {
+        return mask | (1u << DC_COLOR_FORMAT_YCBCR444) |
+               (1u << DC_COLOR_FORMAT_YCBCR422) |
+               (1u << DC_COLOR_FORMAT_YCBCR420);
+    }
+
+    /* EDID 1.4 digital displays declare YCbCr 4:4:4 / 4:2:2 in the base
+     * block, CTA-861 extensions in their header */
+    if ((edid[20] & 0x80) && edid[18] == 1 && edid[19] >= 4) {
+        guint enc = (edid[24] >> 3) & 3;
+        if (enc & 1) mask |= 1u << DC_COLOR_FORMAT_YCBCR444;
+        if (enc & 2) mask |= 1u << DC_COLOR_FORMAT_YCBCR422;
+    }
+
+    blocks = MIN(edid[126], len / 128 - 1);
+    for (b = 1; b <= blocks; b++) {
+        const guchar *x = edid + 128 * b;
+
+        if (x[0] == 0x02) {                       /* CTA-861 extension */
+            if (x[3] & 0x20) mask |= 1u << DC_COLOR_FORMAT_YCBCR444;
+            if (x[3] & 0x10) mask |= 1u << DC_COLOR_FORMAT_YCBCR422;
+            if (x[2] >= 4) {
+                parse_cta_data_blocks(x + 4, MIN(x[2], 127u) - 4, &st);
+            }
+        } else if (x[0] == 0x70) {                /* DisplayID extension */
+            parse_displayid(x, &st);
+        }
+    }
+
+    /*
+     * 4:2:0 is defined for progressive modes only, so vic_matches_mode()
+     * never matches an interlaced one.
+     */
+    for (i = 0; i < st.n_svds && i < 64; i++) {
+        if ((st.cmdb_map & ((guint64) 1 << i)) &&
+            vic_matches_mode(st.svds[i], mode)) {
+            st.y420 = TRUE;
+        }
+    }
+    if (st.y420) {
+        mask |= 1u << DC_COLOR_FORMAT_YCBCR420;
+    }
+    return mask;
+}
+
+
 gchar *dc_aspect_ratio(guint width, guint height)
 {
     static const struct { const gchar *name; gdouble lo, hi; } names[] = {

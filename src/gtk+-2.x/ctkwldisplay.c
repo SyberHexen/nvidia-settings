@@ -73,7 +73,10 @@ static const char *__format_control_help =
 "Selects how pixels are encoded on the link: RGB, or YCbCr with full "
 "(4:4:4) or reduced (4:2:2, 4:2:0) color resolution.  RGB 4:4:4 gives the "
 "sharpest text; YCbCr 4:2:0 lets some displays run modes that otherwise "
-"exceed the link's bandwidth.";
+"exceed the link's bandwidth.  Only the color spaces the display's EDID "
+"allows for the current mode are listed, judged as the kernel driver does: "
+"YCbCr 4:2:0 only for the progressive modes the display lists as 4:2:0 "
+"capable, usually 4K TV modes, and never for interlaced modes.";
 static const char *__controls_apply_help =
 "Asks the compositor to apply the color range and color space, and to "
 "remember them.  You will be asked to confirm the change; if you do not "
@@ -829,6 +832,34 @@ static gint selected_choice(GtkWidget *combo, GArray *values)
 }
 
 
+/* The color formats worth offering for the output's current mode: the ones
+ * the compositor can set and the monitor's EDID allows.  Drivers refuse the
+ * others (YCbCr 4:2:0 for a mode without 4:2:0 support, for example). */
+static guint offered_color_formats(CtkWlDisplay *page, const DcOutput *o)
+{
+    const DcOutputMode *om = output_mode(o);
+    const DcConnector *c = page->kms_info;
+    DcMode mode = { 0 };
+    guint allowed;
+
+    if (om) {
+        mode.width = om->width;
+        mode.height = om->height;
+        mode.refresh = om->refresh;
+        mode.interlaced = om->interlaced;
+    }
+    allowed = dc_edid_color_formats(c ? c->edid : NULL,
+                                    c ? c->edid_len : 0,
+                                    om ? &mode : NULL);
+
+    /* keep showing the current one */
+    if (o->color_format > 0) {
+        allowed |= 1u << o->color_format;
+    }
+    return o->color_formats & allowed;
+}
+
+
 static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
 {
     gboolean any;
@@ -841,7 +872,7 @@ static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
                 o ? o->rgb_range : 0);
     fill_choice(page, page->format_combo, page->format_values,
                 format_choices, G_N_ELEMENTS(format_choices),
-                o ? o->color_formats : 0,
+                o ? offered_color_formats(page, o) : 0,
                 o ? o->color_format : 0);
 
     any = o && (o->rgb_ranges || o->color_formats);
