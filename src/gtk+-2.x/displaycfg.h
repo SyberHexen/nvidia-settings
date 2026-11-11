@@ -66,6 +66,8 @@ typedef struct _DcConnector {
     gint     max_bpc;      /* -1 unknown */
     gchar   *colorspace;   /* NULL if unknown */
     gchar   *rgb_range;    /* "Broadcast RGB", NULL if unknown */
+    gchar   *color_format; /* "color format" (pixel encoding), NULL if
+                            * unknown */
     gint     hdr_metadata; /* -1 unknown, 1 if HDR metadata is being sent */
 
     guchar  *edid;
@@ -154,6 +156,22 @@ typedef enum {
     DC_VRR_AUTOMATIC = 2,     /* KDE: only for fullscreen applications */
 } DcVrr;
 
+/* The values match the DisplayConfig "rgb-range" and "color-format"
+ * properties of Muffin */
+typedef enum {
+    DC_RGB_RANGE_AUTO = 1,
+    DC_RGB_RANGE_FULL = 2,
+    DC_RGB_RANGE_LIMITED = 3,
+} DcRgbRange;
+
+typedef enum {
+    DC_COLOR_FORMAT_AUTO = 1,
+    DC_COLOR_FORMAT_RGB = 2,
+    DC_COLOR_FORMAT_YCBCR444 = 3,
+    DC_COLOR_FORMAT_YCBCR422 = 4,
+    DC_COLOR_FORMAT_YCBCR420 = 5,
+} DcColorFormat;
+
 typedef struct _DcOutputMode {
     gchar   *id;              /* backend identifier */
     guint    width;
@@ -181,6 +199,10 @@ typedef struct _DcOutput {
     gboolean primary;
     DcVrr    vrr;             /* current policy, or DC_VRR_UNSUPPORTED */
     guint    vrr_policies;    /* bit mask of (1 << DcVrr) allowed */
+    gint     rgb_range;       /* DcRgbRange, 0 if it cannot be set */
+    guint    rgb_ranges;      /* bit mask of (1 << DcRgbRange) allowed */
+    gint     color_format;    /* DcColorFormat, 0 if it cannot be set */
+    guint    color_formats;   /* bit mask of (1 << DcColorFormat) allowed */
 
     GArray  *modes;           /* DcOutputMode */
     gint     current_mode;    /* index into modes, -1 if none */
@@ -214,6 +236,16 @@ struct _DcBackend {
      * remember it (only meaningful with DC_CAP_PERSIST). */
     gboolean (*apply)(DcBackend *b, GList *outputs, gboolean persistent,
                       GError **error);
+
+    /* Gamma ramps of the output named 'output' (NULL if not supported).
+     * The ramps have 'size' entries each; get returns newly allocated
+     * ramps to g_free(). */
+    gboolean (*get_gamma)(DcBackend *b, const gchar *output, guint *size,
+                          guint16 **red, guint16 **green, guint16 **blue,
+                          GError **error);
+    gboolean (*set_gamma)(DcBackend *b, const gchar *output, guint size,
+                          const guint16 *red, const guint16 *green,
+                          const guint16 *blue, GError **error);
 
     GList   *watches;         /* internal: change callbacks */
     guint    notify_id;       /* internal: debounce source */
