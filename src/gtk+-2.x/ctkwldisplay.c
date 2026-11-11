@@ -445,6 +445,10 @@ static void page_destroyed(GObject *obj, gpointer data)
     if (page->scales) g_array_free(page->scales, TRUE);
     if (page->vrr_values) g_array_free(page->vrr_values, TRUE);
     page->resolutions = page->rates = page->scales = page->vrr_values = NULL;
+    if (page->verify_id) {
+        g_source_remove(page->verify_id);
+        page->verify_id = 0;
+    }
     if (page->rgb_values) g_array_free(page->rgb_values, TRUE);
     if (page->format_values) g_array_free(page->format_values, TRUE);
     page->rgb_values = page->format_values = NULL;
@@ -837,7 +841,8 @@ static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
                 o ? o->rgb_range : 0);
     fill_choice(page, page->format_combo, page->format_values,
                 format_choices, G_N_ELEMENTS(format_choices),
-                o ? o->color_formats : 0, o ? o->color_format : 0);
+                o ? o->color_formats : 0,
+                o ? o->color_format : 0);
 
     any = o && (o->rgb_ranges || o->color_formats);
     if (any) {
@@ -1254,6 +1259,108 @@ static void apply_clicked(GtkButton *button, gpointer data)
 }
 
 
+/* The value of a KMS "Broadcast RGB" / "color format" enum name */
+static gint rgb_range_from_kms(const gchar *name)
+{
+    if (!name) return 0;
+    if (g_ascii_strcasecmp(name, "Automatic") == 0) return DC_RGB_RANGE_AUTO;
+    if (g_ascii_strcasecmp(name, "Full") == 0) return DC_RGB_RANGE_FULL;
+    if (g_ascii_strncasecmp(name, "Limited", 7) == 0) {
+        return DC_RGB_RANGE_LIMITED;
+    }
+    return 0;
+}
+
+
+static gint color_format_from_kms(const gchar *name)
+{
+    if (!name) return 0;
+    if (g_ascii_strcasecmp(name, "AUTO") == 0) return DC_COLOR_FORMAT_AUTO;
+    if (g_ascii_strcasecmp(name, "RGB") == 0) return DC_COLOR_FORMAT_RGB;
+    if (strstr(name, "4:4:4")) return DC_COLOR_FORMAT_YCBCR444;
+    if (strstr(name, "4:2:2")) return DC_COLOR_FORMAT_YCBCR422;
+    if (strstr(name, "4:2:0")) return DC_COLOR_FORMAT_YCBCR420;
+    return 0;
+}
+
+
+static const gchar *choice_label(const Choice *choices, gint n, gint value)
+{
+    gint i;
+
+    for (i = 0; i < n; i++) {
+        if (choices[i].value == value) return choices[i].label;
+    }
+    return "Unknown";
+}
+
+
+/* After applying, tell the user if the kernel kept other values: drivers
+ * refuse settings the mode cannot be sent with (such as YCbCr 4:2:0 for a
+ * mode without 4:2:0 support), and the compositor then keeps the old ones
+ * while still reporting the requested ones. */
+static gboolean verify_color_settings(gpointer data)
+{
+    CtkWlDisplay *page = data;
+    DcConnector *c = dc_kms_connector(page->card, page->connector);
+    GString *msg = g_string_new(NULL);
+    gint rgb, format;
+
+    page->verify_id = 0;
+    if (!c) {
+        g_string_free(msg, TRUE);
+        return FALSE;
+    }
+
+    rgb = rgb_range_from_kms(c->rgb_range);
+    format = color_format_from_kms(c->color_format);
+    if (page->requested_rgb && rgb && rgb != page->requested_rgb) {
+        g_string_append_printf(msg, "Color Range %s (it uses %s)",
+                               choice_label(rgb_choices,
+                                            G_N_ELEMENTS(rgb_choices),
+                                            page->requested_rgb),
+                               choice_label(rgb_choices,
+                                            G_N_ELEMENTS(rgb_choices), rgb));
+    }
+    if (page->requested_format && format &&
+        format != page->requested_format) {
+        g_string_append_printf(msg, "%sColor Space %s (it uses %s)",
+                               msg->len ? " or " : "",
+                               choice_label(format_choices,
+                                            G_N_ELEMENTS(format_choices),
+                                            page->requested_format),
+                               choice_label(format_choices,
+                                            G_N_ELEMENTS(format_choices),
+                                            format));
+    }
+
+    if (msg->len) {
+        GtkWidget *parent = ctk_get_parent_window(GTK_WIDGET(page));
+        gchar *mode = c->active ? dc_mode_string(&c->current)
+                                : g_strdup("its current mode");
+        GtkWidget *dlg = gtk_message_dialog_new(
+            parent ? GTK_WINDOW(parent) : NULL,
+            GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING,
+            GTK_BUTTONS_CLOSE, "%s did not accept these color settings",
+            page->title);
+
+        gtk_message_dialog_format_secondary_text(
+            GTK_MESSAGE_DIALOG(dlg),
+            "The display or its driver refused %s at %s, so the previous "
+            "settings stay in use.  If the desktop asks whether to keep the "
+            "change, choose Revert.", msg->str, mode);
+        g_signal_connect(G_OBJECT(dlg), "response",
+                         G_CALLBACK(gtk_widget_destroy), NULL);
+        gtk_widget_show(dlg);
+        g_free(mode);
+    }
+
+    g_string_free(msg, TRUE);
+    dc_connector_free(c);
+    return FALSE;
+}
+
+
 /* The Controls tab applies only its own settings, on top of the current
  * configuration, so changes pending on the Information tab stay pending */
 static void controls_apply_clicked(GtkButton *button, gpointer data)
@@ -1282,13 +1389,24 @@ static void controls_apply_clicked(GtkButton *button, gpointer data)
         dc_output_list_free(before);
         return;
     }
+    page->requested_rgb = page->requested_format = 0;
     if ((v = selected_choice(page->rgb_combo, page->rgb_values))) {
+        if (v != o->rgb_range) page->requested_rgb = v;
         o->rgb_range = v;
     }
     if ((v = selected_choice(page->format_combo, page->format_values))) {
+        if (v != o->color_format) page->requested_format = v;
         o->color_format = v;
     }
     run_apply(page, before, config, page->controls_apply);
+
+    /* The mode set happens with the compositor's next frame */
+    if (page->verify_id) {
+        g_source_remove(page->verify_id);
+    }
+    if (page->requested_rgb || page->requested_format) {
+        page->verify_id = g_timeout_add(1500, verify_color_settings, page);
+    }
 }
 
 

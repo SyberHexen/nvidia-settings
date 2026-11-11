@@ -97,6 +97,9 @@ struct _CtkWlDisplay
     GtkWidget *controls_reset;
     GArray *rgb_values;          /* gint (DcRgbRange), per combo row */
     GArray *format_values;       /* gint (DcColorFormat), per combo row */
+    guint verify_id;             /* checks the kernel took the settings */
+    gint requested_rgb;          /* last applied, 0 if unchanged */
+    gint requested_format;
 
     /* Color Correction tab */
     GtkWidget *cc_box;
