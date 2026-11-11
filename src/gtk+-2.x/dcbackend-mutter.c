@@ -65,6 +65,30 @@ static gboolean lookup_bool(GVariant *dict, const gchar *key)
 }
 
 
+/* A setting offered as "<key>" (u) plus "<supported_key>" (au); Muffin
+ * (Cinnamon) lists the RGB range and color format this way.  Returns the
+ * current value, 0 if the setting is absent. */
+static gint lookup_choice(GVariant *dict, const gchar *key,
+                          const gchar *supported_key, guint *mask)
+{
+    guint32 value = 0, v;
+    GVariantIter *it;
+
+    *mask = 0;
+    if (!g_variant_lookup(dict, key, "u", &value) ||
+        !g_variant_lookup(dict, supported_key, "au", &it)) {
+        return 0;
+    }
+    while (g_variant_iter_next(it, "u", &v)) {
+        if (v < 32) {
+            *mask |= 1u << v;
+        }
+    }
+    g_variant_iter_free(it);
+    return *mask ? (gint) value : 0;
+}
+
+
 /* ---- query -------------------------------------------------------------- */
 
 static void parse_mode(GVariant *mv, DcOutputMode *m, gboolean *current)
@@ -151,6 +175,11 @@ static GList *mutter_query(DcBackend *b, GError **error)
         o->scale = 1.0;
         o->current_mode = -1;
         o->vrr = DC_VRR_UNSUPPORTED;
+        o->rgb_range = lookup_choice(mprops, "rgb-range",
+                                     "supported-rgb-ranges", &o->rgb_ranges);
+        o->color_format = lookup_choice(mprops, "color-format",
+                                        "supported-color-formats",
+                                        &o->color_formats);
         o->modes = g_array_new(FALSE, FALSE, sizeof(DcOutputMode));
 
         g_variant_iter_init(&mit, modes);
@@ -320,9 +349,20 @@ static gboolean mutter_apply(DcBackend *b, GList *outputs,
             DcOutput *o = l->data;
             const DcOutputMode *m =
                 &g_array_index(o->modes, DcOutputMode, o->current_mode);
+            GVariantBuilder mprops;
+
+            g_variant_builder_init(&mprops, G_VARIANT_TYPE("a{sv}"));
+            if (o->rgb_range > 0 && (o->rgb_ranges & (1u << o->rgb_range))) {
+                g_variant_builder_add(&mprops, "{sv}", "rgb-range",
+                                      g_variant_new_uint32(o->rgb_range));
+            }
+            if (o->color_format > 0 &&
+                (o->color_formats & (1u << o->color_format))) {
+                g_variant_builder_add(&mprops, "{sv}", "color-format",
+                                      g_variant_new_uint32(o->color_format));
+            }
             g_variant_builder_add(&mons, "(ss@a{sv})", o->name, m->id,
-                                  g_variant_new_array(G_VARIANT_TYPE("{sv}"),
-                                                      NULL, 0));
+                                  g_variant_builder_end(&mprops));
         }
         g_variant_builder_add(&lm, "(iiduba(ssa{sv}))", c->x, c->y, c->scale,
                               (guint32) c->transform, c->primary, &mons);
@@ -337,6 +377,132 @@ static gboolean mutter_apply(DcBackend *b, GList *outputs,
                                &lm,
                                g_variant_new_array(G_VARIANT_TYPE("{sv}"),
                                                    NULL, 0)),
+                 NULL, error);
+    if (!reply) {
+        if (error && *error) {
+            g_dbus_error_strip_remote_error(*error);
+        }
+        return FALSE;
+    }
+    g_variant_unref(reply);
+    return TRUE;
+}
+
+
+/* ---- gamma -------------------------------------------------------------- */
+
+/* The CRTC index (as GetCrtcGamma/SetCrtcGamma take it) currently driving
+ * the output named 'name', and the serial to pass along.  Connector names
+ * can repeat across GPUs; only one of them is driven. */
+static gboolean find_crtc(MutterPriv *p, const gchar *name, guint32 *serial,
+                          guint32 *crtc, GError **error)
+{
+    GVariant *reply, *outputs, *v;
+    GVariantIter it;
+    gboolean found = FALSE;
+
+    reply = call(p, "GetResources", NULL,
+                 G_VARIANT_TYPE("(ua(uxiiiiiuaua{sv})a(uxiausauaua{sv})"
+                                "a(uxuudu)ii)"), error);
+    if (!reply) {
+        return FALSE;
+    }
+    g_variant_get(reply, "(u@a(uxiiiiiuaua{sv})@a(uxiausauaua{sv})"
+                         "@a(uxuudu)ii)", serial, NULL, &outputs, NULL,
+                  NULL, NULL);
+    g_variant_iter_init(&it, outputs);
+    while (!found && (v = g_variant_iter_next_value(&it))) {
+        gint32 current_crtc;
+        const gchar *oname;
+
+        g_variant_get(v, "(uxi@au&s@au@au@a{sv})", NULL, NULL,
+                      &current_crtc, NULL, &oname, NULL, NULL, NULL);
+        if (current_crtc >= 0 && g_strcmp0(oname, name) == 0) {
+            *crtc = (guint32) current_crtc;
+            found = TRUE;
+        }
+        g_variant_unref(v);
+    }
+    g_variant_unref(outputs);
+    g_variant_unref(reply);
+
+    if (!found) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                    "%s is not turned on.", name);
+    }
+    return found;
+}
+
+
+static guint16 *ramp_from_variant(GVariant *v, gsize *n)
+{
+    gconstpointer data = g_variant_get_fixed_array(v, n, sizeof(guint16));
+    return g_memdup2(data, *n * sizeof(guint16));
+}
+
+
+static gboolean mutter_get_gamma(DcBackend *b, const gchar *output,
+                                 guint *size, guint16 **red, guint16 **green,
+                                 guint16 **blue, GError **error)
+{
+    MutterPriv *p = b->priv;
+    guint32 serial, crtc;
+    GVariant *reply, *r, *g, *bl;
+    gsize nr, ng, nb;
+
+    if (!find_crtc(p, output, &serial, &crtc, error)) {
+        return FALSE;
+    }
+    reply = call(p, "GetCrtcGamma", g_variant_new("(uu)", serial, crtc),
+                 G_VARIANT_TYPE("(aqaqaq)"), error);
+    if (!reply) {
+        if (error && *error) {
+            g_dbus_error_strip_remote_error(*error);
+        }
+        return FALSE;
+    }
+    g_variant_get(reply, "(@aq@aq@aq)", &r, &g, &bl);
+    *red = ramp_from_variant(r, &nr);
+    *green = ramp_from_variant(g, &ng);
+    *blue = ramp_from_variant(bl, &nb);
+    g_variant_unref(r);
+    g_variant_unref(g);
+    g_variant_unref(bl);
+    g_variant_unref(reply);
+
+    *size = MIN(nr, MIN(ng, nb));
+    if (*size < 2) {
+        g_free(*red);
+        g_free(*green);
+        g_free(*blue);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                    "The compositor reports no gamma ramp for %s.", output);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+
+static gboolean mutter_set_gamma(DcBackend *b, const gchar *output,
+                                 guint size, const guint16 *red,
+                                 const guint16 *green, const guint16 *blue,
+                                 GError **error)
+{
+    MutterPriv *p = b->priv;
+    guint32 serial, crtc;
+    GVariant *reply;
+
+    if (!find_crtc(p, output, &serial, &crtc, error)) {
+        return FALSE;
+    }
+    reply = call(p, "SetCrtcGamma",
+                 g_variant_new("(uu@aq@aq@aq)", serial, crtc,
+                     g_variant_new_fixed_array(G_VARIANT_TYPE_UINT16, red,
+                                               size, sizeof(guint16)),
+                     g_variant_new_fixed_array(G_VARIANT_TYPE_UINT16, green,
+                                               size, sizeof(guint16)),
+                     g_variant_new_fixed_array(G_VARIANT_TYPE_UINT16, blue,
+                                               size, sizeof(guint16))),
                  NULL, error);
     if (!reply) {
         if (error && *error) {
@@ -386,6 +552,8 @@ DcBackend *dc_backend_mutter_new(const gchar *bus_name,
               : "Mutter DisplayConfig (D-Bus)";
     b->query = mutter_query;
     b->apply = mutter_apply;
+    b->get_gamma = mutter_get_gamma;
+    b->set_gamma = mutter_set_gamma;
     b->priv = p;
 
     /* Is the interface there? */

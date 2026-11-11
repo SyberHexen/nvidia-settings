@@ -121,12 +121,6 @@ typedef struct __NvCtrlNvmlAttributes NvCtrlNvmlAttributes;
 typedef struct __NvCtrlEventPrivateHandle NvCtrlEventPrivateHandle;
 typedef struct __NvCtrlEventPrivateHandleNode NvCtrlEventPrivateHandleNode;
 
-typedef struct {
-    float brightness[3];
-    float contrast[3];
-    float gamma[3];
-} NvCtrlGammaInput;
-
 struct __NvCtrlNvControlAttributes {
     int event_base;
     int error_base;
@@ -473,21 +467,6 @@ ReturnStatus
 NvCtrlNvControlStringOperation (NvCtrlAttributePrivateHandle *h,
                                 unsigned int display_mask, int attr,
                                 const char *ptrIn, char **ptrOut);
-
-/* helper functions for XV86VidMode and RandR backends */
-
-void NvCtrlInitGammaInputStruct(NvCtrlGammaInput *pGammaInput);
-
-void NvCtrlUpdateGammaRamp(const NvCtrlGammaInput *pGammaInput,
-                           int gammaRampSize,
-                           unsigned short *gammaRamp[3],
-                           unsigned int bitmask);
-
-void NvCtrlAssignGammaInput(NvCtrlGammaInput *pGammaInput,
-                            const float inContrast[3],
-                            const float inBrightness[3],
-                            const float inGamma[3],
-                            const unsigned int bitmask);
 
 /* NVML backend functions */
 

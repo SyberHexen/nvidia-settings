@@ -369,18 +369,46 @@ GtkWidget* ctk_curve_new(CtrlTarget *ctrl_target, GtkWidget *color)
     gdk_colormap_alloc_color(gdk_colormap, gdk_color, FALSE, TRUE);
 #endif
 
-    g_signal_connect_swapped(G_OBJECT(ctk_curve->color), "changed",
-                             G_CALLBACK(ctk_curve_color_changed),
-                             (gpointer) ctk_curve);
+    if (color) {
+        g_signal_connect_swapped(G_OBJECT(ctk_curve->color), "changed",
+                                 G_CALLBACK(ctk_curve_color_changed),
+                                 (gpointer) ctk_curve);
+    }
 
     return GTK_WIDGET(object);
+}
+
+
+/* A curve that draws the ramps 'func' supplies; call
+ * ctk_curve_color_changed() when they change. */
+GtkWidget* ctk_curve_new_with_ramps(CtkCurveRampFunc func, gpointer data)
+{
+    GtkWidget *widget = ctk_curve_new(NULL, NULL);
+    CtkCurve *ctk_curve = CTK_CURVE(widget);
+
+    ctk_curve->ramp_func = func;
+    ctk_curve->ramp_data = data;
+    return widget;
+}
+
+
+
+static void get_ramp(CtkCurve *ctk_curve, gint channel, gushort **lut,
+                     gint *n_lut_entries)
+{
+    if (ctk_curve->ramp_func) {
+        ctk_curve->ramp_func(ctk_curve->ramp_data, channel, lut,
+                             n_lut_entries);
+    } else {
+        NvCtrlGetColorRamp(ctk_curve->ctrl_target, channel, lut,
+                           n_lut_entries);
+    }
 }
 
 
 
 static void draw(CtkCurve *ctk_curve)
 {
-    CtrlTarget *ctrl_target = ctk_curve->ctrl_target;
     gushort *lut;
     gint n_lut_entries;
 
@@ -397,17 +425,17 @@ static void draw(CtkCurve *ctk_curve)
     cairo_set_operator(ctk_curve->c_context, CAIRO_OPERATOR_ADD);
 
     cairo_set_source_rgba(ctk_curve->c_context, 1.0, 0.0, 0.0, 1.0);
-    NvCtrlGetColorRamp(ctrl_target, RED_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, RED_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->c_context, lut, n_lut_entries,
                     ctk_curve->width, ctk_curve->height);
 
     cairo_set_source_rgba(ctk_curve->c_context, 0.0, 1.0, 0.0, 1.0);
-    NvCtrlGetColorRamp(ctrl_target, GREEN_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, GREEN_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->c_context, lut, n_lut_entries,
                     ctk_curve->width, ctk_curve->height);
 
     cairo_set_source_rgba(ctk_curve->c_context, 0.0, 0.0, 1.0, 1.0);
-    NvCtrlGetColorRamp(ctrl_target, BLUE_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, BLUE_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->c_context, lut, n_lut_entries,
                     ctk_curve->width, ctk_curve->height);
 #else
@@ -421,17 +449,17 @@ static void draw(CtkCurve *ctk_curve)
     gdk_gc_set_function(ctk_curve->gdk_gc, GDK_XOR);
 
     gdk_gc_set_foreground(ctk_curve->gdk_gc, &ctk_curve->gdk_color_red);
-    NvCtrlGetColorRamp(ctrl_target, RED_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, RED_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->gdk_pixmap, ctk_curve->gdk_gc,
                     lut, n_lut_entries, ctk_curve->width, ctk_curve->height);
     
     gdk_gc_set_foreground(ctk_curve->gdk_gc, &ctk_curve->gdk_color_green);
-    NvCtrlGetColorRamp(ctrl_target, GREEN_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, GREEN_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->gdk_pixmap, ctk_curve->gdk_gc,
                     lut, n_lut_entries, ctk_curve->width, ctk_curve->height);
 
     gdk_gc_set_foreground(ctk_curve->gdk_gc, &ctk_curve->gdk_color_blue);
-    NvCtrlGetColorRamp(ctrl_target, BLUE_CHANNEL, &lut, &n_lut_entries);
+    get_ramp(ctk_curve, BLUE_CHANNEL, &lut, &n_lut_entries);
     plot_color_ramp(ctk_curve->gdk_pixmap, ctk_curve->gdk_gc,
                     lut, n_lut_entries, ctk_curve->width, ctk_curve->height);
 #endif

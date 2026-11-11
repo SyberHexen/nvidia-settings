@@ -533,6 +533,8 @@ static void read_connector_props(int fd, DcConnector *c, guint32 *crtc_id)
             c->colorspace = enum_value_name(p, v);
         } else if (strcmp(p->name, "Broadcast RGB") == 0) {
             c->rgb_range = enum_value_name(p, v);
+        } else if (strcmp(p->name, "color format") == 0) {
+            c->color_format = enum_value_name(p, v);
         } else if (strcmp(p->name, "HDR_OUTPUT_METADATA") == 0) {
             c->hdr_metadata = v != 0;
         }
@@ -745,6 +747,7 @@ void dc_connector_free(gpointer data)
     if (c->modes) g_array_free(c->modes, TRUE);
     g_free(c->colorspace);
     g_free(c->rgb_range);
+    g_free(c->color_format);
     g_free(c->edid);
     g_free(c->monitor);
     g_free(c->vendor);
