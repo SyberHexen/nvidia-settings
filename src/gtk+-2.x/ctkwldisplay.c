@@ -69,6 +69,14 @@ static const char *__rgb_control_help =
 "for TV modes, full range otherwise.  Choose Full for most monitors, and "
 "for TVs set to full range (often called HDMI Black Level, RGB Range or "
 "HDMI Dynamic Range).";
+static const char *__mode_control_help =
+"Switches the display between standard (SDR) and HDR10 signalling: PQ "
+"with BT.2020 colors and HDR metadata, at 10 bits per color where the "
+"link allows.  The compositor does not convert SDR content, so the desktop "
+"looks oversaturated in HDR10; leave this off and fullscreen HDR10 games "
+"and videos switch the display to HDR10 by themselves, and back when they "
+"end.  Use HDR10 here for applications that only offer HDR once the "
+"display is already in HDR, such as browsers.";
 static const char *__format_control_help =
 "Selects how pixels are encoded on the link: RGB, or YCbCr with full "
 "(4:4:4) or reduced (4:2:2, 4:2:0) color resolution.  RGB 4:4:4 gives the "
@@ -454,7 +462,8 @@ static void page_destroyed(GObject *obj, gpointer data)
     }
     if (page->rgb_values) g_array_free(page->rgb_values, TRUE);
     if (page->format_values) g_array_free(page->format_values, TRUE);
-    page->rgb_values = page->format_values = NULL;
+    if (page->mode_values) g_array_free(page->mode_values, TRUE);
+    page->rgb_values = page->format_values = page->mode_values = NULL;
     g_free(page->cc_output);
     page->cc_output = NULL;
 }
@@ -792,6 +801,11 @@ static const Choice rgb_choices[] = {
     { DC_RGB_RANGE_LIMITED, "Limited (16-235)" },
 };
 
+static const Choice mode_choices[] = {
+    { DC_COLOR_MODE_SDR,   "Off (SDR)" },
+    { DC_COLOR_MODE_HDR10, "HDR10 (BT.2100)" },
+};
+
 static const Choice format_choices[] = {
     { DC_COLOR_FORMAT_AUTO,     "Automatic" },
     { DC_COLOR_FORMAT_RGB,      "RGB" },
@@ -874,8 +888,11 @@ static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
                 format_choices, G_N_ELEMENTS(format_choices),
                 o ? offered_color_formats(page, o) : 0,
                 o ? o->color_format : 0);
+    fill_choice(page, page->mode_combo, page->mode_values, mode_choices,
+                G_N_ELEMENTS(mode_choices), o ? o->color_modes : 0,
+                o ? o->color_mode : 0);
 
-    any = o && (o->rgb_ranges || o->color_formats);
+    any = o && (o->rgb_ranges || o->color_formats || o->color_modes);
     if (any) {
         gtk_label_set_text(GTK_LABEL(page->controls_status),
                            g_object_get_data(G_OBJECT(page), "status-text"));
@@ -1429,6 +1446,11 @@ static void controls_apply_clicked(GtkButton *button, gpointer data)
         if (v != o->color_format) page->requested_format = v;
         o->color_format = v;
     }
+    if ((v = selected_choice(page->mode_combo, page->mode_values)) &&
+        v != o->color_mode) {
+        o->color_mode = v;
+        o->color_mode_changed = TRUE;
+    }
     run_apply(page, before, config, page->controls_apply);
 
     /* The mode set happens with the compositor's next frame */
@@ -1623,6 +1645,7 @@ static void build_color_controls(CtkWlDisplay *page, GtkWidget *vbox)
 
     page->rgb_values = g_array_new(FALSE, FALSE, sizeof(gint));
     page->format_values = g_array_new(FALSE, FALSE, sizeof(gint));
+    page->mode_values = g_array_new(FALSE, FALSE, sizeof(gint));
 
     table = ctk_section_table_new(vbox, "Color Controls");
     page->controls_table = table;
@@ -1632,9 +1655,14 @@ static void build_color_controls(CtkWlDisplay *page, GtkWidget *vbox)
     page->format_combo = ctk_combo_box_text_new();
     config_row(page, table, &row, "Color Space:", page->format_combo,
                __format_control_help);
+    page->mode_combo = ctk_combo_box_text_new();
+    config_row(page, table, &row, "HDR:", page->mode_combo,
+               __mode_control_help);
     g_signal_connect(G_OBJECT(page->rgb_combo), "changed",
                      G_CALLBACK(controls_changed), page);
     g_signal_connect(G_OBJECT(page->format_combo), "changed",
+                     G_CALLBACK(controls_changed), page);
+    g_signal_connect(G_OBJECT(page->mode_combo), "changed",
                      G_CALLBACK(controls_changed), page);
 
     hbox = gtk_hbox_new(FALSE, 5);

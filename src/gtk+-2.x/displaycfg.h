@@ -181,6 +181,13 @@ typedef enum {
     DC_COLOR_FORMAT_YCBCR420 = 5,
 } DcColorFormat;
 
+/* How the output signals color.  Numbered from 1 like the settings above,
+ * so 0 means it cannot be set; Muffin numbers them from 0. */
+typedef enum {
+    DC_COLOR_MODE_SDR = 1,
+    DC_COLOR_MODE_HDR10 = 2,    /* BT.2100: PQ with BT.2020 primaries */
+} DcColorMode;
+
 typedef struct _DcOutputMode {
     gchar   *id;              /* backend identifier */
     guint    width;
@@ -212,6 +219,11 @@ typedef struct _DcOutput {
     guint    rgb_ranges;      /* bit mask of (1 << DcRgbRange) allowed */
     gint     color_format;    /* DcColorFormat, 0 if it cannot be set */
     guint    color_formats;   /* bit mask of (1 << DcColorFormat) allowed */
+    gint     color_mode;      /* DcColorMode, 0 if it cannot be set */
+    guint    color_modes;     /* bit mask of (1 << DcColorMode) allowed */
+    gboolean color_mode_changed; /* send color_mode; otherwise the compositor
+                                  * keeps the current one, which it may have
+                                  * switched to by itself (HDR passthrough) */
 
     GArray  *modes;           /* DcOutputMode */
     gint     current_mode;    /* index into modes, -1 if none */
