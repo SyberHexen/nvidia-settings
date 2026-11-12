@@ -69,6 +69,34 @@ static const char *__rgb_control_help =
 "for TV modes, full range otherwise.  Choose Full for most monitors, and "
 "for TVs set to full range (often called HDMI Black Level, RGB Range or "
 "HDMI Dynamic Range).";
+static const char *__mode_control_help =
+"Switches the display between standard (SDR) and HDR10 signalling: PQ "
+"with BT.2020 colors and HDR metadata, at 10 bits per color where the "
+"link allows.  With a compositor that converts SDR content (Muffin with "
+"HDR settings), the desktop looks the same in HDR10, at the SDR "
+"Brightness below.  Off keeps the display in SDR.  Automatic switches it "
+"to HDR10 while a fullscreen game or video shows HDR10 content, and back "
+"when it ends.  On keeps it in HDR10, which applications that only offer "
+"HDR once the display is in HDR need, such as browsers.";
+static const char *__peak_help =
+"The highest luminance the display reaches in HDR10, in cd/m² (nits).  "
+"HDR games and videos brighter than this are tone mapped to it, so their "
+"highlights keep their detail instead of being clipped by the display, "
+"and the display is told no content goes past it.  0 uses the value the "
+"display reports in its EDID; many TVs report none, and then HDR content "
+"is not tone mapped.  Look up your display's peak brightness, or lower "
+"this until the brightest highlights in an HDR test pattern stop "
+"blending together.";
+static const char *__sdr_white_help =
+"How bright SDR content (the desktop and other applications) is shown "
+"while the display is in HDR10, as the luminance of white in cd/m² "
+"(nits).  203 is the reference level for HDR video (ITU-R BT.2408); raise "
+"it if the desktop looks dim in HDR10 next to SDR.";
+static const char *__range_info_help =
+"The NVIDIA driver has no color range setting: it sends RGB as full range "
+"(0-255) and YCbCr as limited range (16-235).  Choose RGB under Color Space "
+"for full range.";
+
 static const char *__format_control_help =
 "Selects how pixels are encoded on the link: RGB, or YCbCr with full "
 "(4:4:4) or reduced (4:2:2, 4:2:0) color resolution.  RGB 4:4:4 gives the "
@@ -454,7 +482,8 @@ static void page_destroyed(GObject *obj, gpointer data)
     }
     if (page->rgb_values) g_array_free(page->rgb_values, TRUE);
     if (page->format_values) g_array_free(page->format_values, TRUE);
-    page->rgb_values = page->format_values = NULL;
+    if (page->mode_values) g_array_free(page->mode_values, TRUE);
+    page->rgb_values = page->format_values = page->mode_values = NULL;
     g_free(page->cc_output);
     page->cc_output = NULL;
 }
@@ -792,6 +821,34 @@ static const Choice rgb_choices[] = {
     { DC_RGB_RANGE_LIMITED, "Limited (16-235)" },
 };
 
+static const Choice mode_choices[] = {
+    { DC_COLOR_MODE_SDR,   "Off (SDR)" },
+    { DC_COLOR_MODE_HDR10, "HDR10 (BT.2100)" },
+};
+
+/* With a compositor that has HDR settings per display: the color mode and
+ * whether HDR passthrough may switch it, as one choice */
+enum {
+    HDR_POLICY_OFF = 1,
+    HDR_POLICY_AUTO = 2,
+    HDR_POLICY_ON = 3,
+};
+
+static const Choice policy_choices[] = {
+    { HDR_POLICY_OFF,  "Off (SDR)" },
+    { HDR_POLICY_AUTO, "Automatic (HDR10 for fullscreen HDR content)" },
+    { HDR_POLICY_ON,   "On (HDR10)" },
+};
+
+static gint current_hdr_policy(const DcOutput *o)
+{
+    /* HDR10 that passthrough switched to is still Automatic */
+    if (o->color_mode == DC_COLOR_MODE_HDR10 && !o->hdr_auto_switched) {
+        return HDR_POLICY_ON;
+    }
+    return o->hdr_auto_switch ? HDR_POLICY_AUTO : HDR_POLICY_OFF;
+}
+
 static const Choice format_choices[] = {
     { DC_COLOR_FORMAT_AUTO,     "Automatic" },
     { DC_COLOR_FORMAT_RGB,      "RGB" },
@@ -860,32 +917,192 @@ static guint offered_color_formats(CtkWlDisplay *page, const DcOutput *o)
 }
 
 
+/* Show or hide a row made by config_row(), its name included */
+static void show_row(GtkWidget *row, gboolean show)
+{
+    GtkWidget *label = g_object_get_data(G_OBJECT(row), "row-label");
+
+    /* The row is no-show-all, so showing the window never showed the
+     * control inside it either, and gtk_widget_show_all() skips the row
+     * itself: show its children */
+    if (show) {
+        gtk_container_foreach(GTK_CONTAINER(row),
+                              (GtkCallback) gtk_widget_show_all, NULL);
+    }
+    gtk_widget_set_visible(row, show);
+    if (label) {
+        gtk_widget_set_visible(label, show);
+    }
+}
+
+
+/* The color modes worth offering: HDR10 only for a display whose EDID
+ * accepts it.  Compositors offer it wherever the connector can signal it
+ * (Muffin does for every NVIDIA DisplayPort connector), whatever the
+ * display. */
+static guint offered_color_modes(CtkWlDisplay *page, const DcOutput *o)
+{
+    const DcConnector *c = page->kms_info;
+    guint modes = o->color_modes;
+
+    if (o->color_mode != DC_COLOR_MODE_HDR10 &&
+        !dc_edid_supports_hdr10(c ? c->edid : NULL, c ? c->edid_len : 0)) {
+        modes &= ~(1u << DC_COLOR_MODE_HDR10);
+    }
+    return modes;
+}
+
+
+/* Whether a DRM card is driven by the NVIDIA driver, which has no color
+ * range setting: it sends RGB as full range and YCbCr as limited range */
+static gboolean card_is_nvidia(const gchar *card)
+{
+    gchar *link = g_strdup_printf("/sys/class/drm/%s/device/driver", card);
+    gchar *target = g_file_read_link(link, NULL);
+    gboolean nvidia = target && g_str_has_suffix(target, "/nvidia");
+
+    g_free(target);
+    g_free(link);
+    return nvidia;
+}
+
+
+/* The read-only Color Range of a display whose range follows its color
+ * space, for the color space selected in the drop down */
+static void update_range_info(CtkWlDisplay *page)
+{
+    const gchar *text;
+
+    if (!page->range_info_label || !page->range_follows_format) {
+        return;
+    }
+    switch (selected_choice(page->format_combo, page->format_values)) {
+    case DC_COLOR_FORMAT_RGB:
+        text = "Full (0-255), set by Color Space";
+        break;
+    case DC_COLOR_FORMAT_YCBCR444:
+    case DC_COLOR_FORMAT_YCBCR422:
+    case DC_COLOR_FORMAT_YCBCR420:
+        text = "Limited (16-235), set by Color Space";
+        break;
+    default:
+        text = "Set by Color Space: Full for RGB, Limited for YCbCr";
+        break;
+    }
+    gtk_label_set_text(GTK_LABEL(page->range_info_label), text);
+}
+
+
 static void fill_color_controls(CtkWlDisplay *page, const DcOutput *o)
 {
-    gboolean any;
+    guint rgb = o ? o->rgb_ranges : 0;
+    guint format = o ? offered_color_formats(page, o) : 0;
+    guint mode = o ? offered_color_modes(page, o) : 0;
+    gboolean show_rgb, show_format, show_mode, any;
 
     if (!page->controls_table) {
         return;
     }
     fill_choice(page, page->rgb_combo, page->rgb_values, rgb_choices,
-                G_N_ELEMENTS(rgb_choices), o ? o->rgb_ranges : 0,
-                o ? o->rgb_range : 0);
+                G_N_ELEMENTS(rgb_choices), rgb, o ? o->rgb_range : 0);
     fill_choice(page, page->format_combo, page->format_values,
-                format_choices, G_N_ELEMENTS(format_choices),
-                o ? offered_color_formats(page, o) : 0,
+                format_choices, G_N_ELEMENTS(format_choices), format,
                 o ? o->color_format : 0);
+    page->uses_hdr_policy = o && o->has_hdr_policy;
+    if (page->uses_hdr_policy) {
+        /* the HDR10 mode is offered at all: offer every policy */
+        guint policies = (mode & (1u << DC_COLOR_MODE_HDR10))
+            ? (1u << HDR_POLICY_OFF) | (1u << HDR_POLICY_AUTO) |
+              (1u << HDR_POLICY_ON)
+            : 0;
 
-    any = o && (o->rgb_ranges || o->color_formats);
-    if (any) {
-        gtk_label_set_text(GTK_LABEL(page->controls_status),
-                           g_object_get_data(G_OBJECT(page), "status-text"));
+        fill_choice(page, page->mode_combo, page->mode_values,
+                    policy_choices, G_N_ELEMENTS(policy_choices), policies,
+                    current_hdr_policy(o));
+        mode = policies;
     } else {
+        fill_choice(page, page->mode_combo, page->mode_values, mode_choices,
+                    G_N_ELEMENTS(mode_choices), mode, o ? o->color_mode : 0);
+    }
+    if (page->peak_spin) {
+        gboolean show_peak = page->uses_hdr_policy && mode && o->has_hdr_peak;
+
+        page->updating = TRUE;
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(page->peak_spin),
+                                  show_peak ? o->hdr_peak_luminance : 0);
+        page->updating = FALSE;
+        if (show_peak) {
+            gchar *s = o->hdr_edid_peak
+                ? g_strdup_printf("cd/m² (nits); 0 uses the display's %u",
+                                  o->hdr_edid_peak)
+                : g_strdup("cd/m² (nits); 0: the display reports none, so "
+                           "HDR is not tone mapped");
+            gtk_label_set_text(GTK_LABEL(page->peak_unit), s);
+            g_free(s);
+        }
+        show_row(page->peak_row, show_peak);
+    }
+    if (page->sdr_white_spin) {
+        page->updating = TRUE;
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(page->sdr_white_spin),
+                                  o && o->sdr_white_level
+                                  ? o->sdr_white_level : 203);
+        page->updating = FALSE;
+        show_row(page->sdr_white_row,
+                 page->uses_hdr_policy && mode && o->sdr_white_level);
+    }
+
+    /* Only show the settings this display offers a choice in: a driver may
+     * give some connectors no color range or color space (the NVIDIA driver
+     * has neither for DisplayPort), and a display without HDR keeps only
+     * SDR.  An empty or one-item drop down would look broken. */
+    show_rgb = (rgb & (rgb - 1)) != 0;           /* two choices or more */
+    show_format = (format & (format - 1)) != 0;
+    show_mode = (mode & (mode - 1)) != 0;
+    show_row(page->rgb_row, show_rgb);
+    show_row(page->format_row, show_format);
+    show_row(page->mode_row, show_mode);
+
+    /* Without a range setting, the NVIDIA driver's range follows the color
+     * space: say so instead of hiding Color Range */
+    page->range_follows_format = !show_rgb && show_format &&
+                                 card_is_nvidia(page->card);
+    show_row(page->range_info_row, page->range_follows_format);
+    update_range_info(page);
+
+    any = show_rgb || show_format || show_mode;
+    if (!o || !(o->rgb_ranges || o->color_formats || o->color_modes)) {
         gchar *s = g_strdup_printf("%s does not offer these settings for "
                                    "this display.  On Cinnamon they need "
                                    "Muffin with color range support.",
                                    page->backend->name);
         gtk_label_set_text(GTK_LABEL(page->controls_status), s);
         g_free(s);
+    } else if (!any) {
+        gtk_label_set_text(GTK_LABEL(page->controls_status),
+                           "Color Range, Color Space and HDR cannot be "
+                           "changed for this display.");
+    } else if ((!show_rgb && !page->range_follows_format) ||
+               !show_format || !show_mode) {
+        const gchar *names[2];
+        gint n = 0;
+        gchar *s;
+
+        if (!show_rgb && !page->range_follows_format) {
+            names[n++] = "Color Range";
+        }
+        if (!show_format) names[n++] = "Color Space";
+        if (!show_mode && n < 2) names[n++] = "HDR";
+        s = g_strdup_printf("%s  %s%s%s cannot be changed for this display.",
+                            (const gchar *)
+                            g_object_get_data(G_OBJECT(page), "status-text"),
+                            names[0], n == 2 ? " and " : "",
+                            n == 2 ? names[1] : "");
+        gtk_label_set_text(GTK_LABEL(page->controls_status), s);
+        g_free(s);
+    } else {
+        gtk_label_set_text(GTK_LABEL(page->controls_status),
+                           g_object_get_data(G_OBJECT(page), "status-text"));
     }
     gtk_widget_set_sensitive(page->controls_apply, any);
     gtk_widget_set_sensitive(page->controls_reset, any);
@@ -1429,6 +1646,51 @@ static void controls_apply_clicked(GtkButton *button, gpointer data)
         if (v != o->color_format) page->requested_format = v;
         o->color_format = v;
     }
+    if (page->uses_hdr_policy) {
+        v = selected_choice(page->mode_combo, page->mode_values);
+        if (v && v != current_hdr_policy(o)) {
+            /* Automatic and Off are the SDR mode in the configuration;
+             * passthrough switches Automatic to HDR10 when wanted */
+            gint mode = v == HDR_POLICY_ON ? DC_COLOR_MODE_HDR10
+                                           : DC_COLOR_MODE_SDR;
+            gboolean auto_switch = v != HDR_POLICY_OFF;
+
+            if (mode != o->color_mode || o->hdr_auto_switched) {
+                o->color_mode = mode;
+                o->color_mode_changed = TRUE;
+            }
+            if (auto_switch != o->hdr_auto_switch) {
+                o->hdr_auto_switch = auto_switch;
+                o->hdr_auto_switch_changed = TRUE;
+            }
+        }
+        if (o->has_hdr_peak && page->peak_spin) {
+            guint peak = gtk_spin_button_get_value_as_int(
+                GTK_SPIN_BUTTON(page->peak_spin));
+
+            /* below the lowest peak Muffin takes means the EDID's */
+            if (peak > 0 && peak < 80) {
+                peak = 80;
+            }
+            if (peak != o->hdr_peak_luminance) {
+                o->hdr_peak_luminance = peak;
+                o->hdr_peak_luminance_changed = TRUE;
+            }
+        }
+        if (o->sdr_white_level && page->sdr_white_spin) {
+            guint level = gtk_spin_button_get_value_as_int(
+                GTK_SPIN_BUTTON(page->sdr_white_spin));
+
+            if (level != o->sdr_white_level) {
+                o->sdr_white_level = level;
+                o->sdr_white_level_changed = TRUE;
+            }
+        }
+    } else if ((v = selected_choice(page->mode_combo, page->mode_values)) &&
+               v != o->color_mode) {
+        o->color_mode = v;
+        o->color_mode_changed = TRUE;
+    }
     run_apply(page, before, config, page->controls_apply);
 
     /* The mode set happens with the compositor's next frame */
@@ -1446,6 +1708,7 @@ static void controls_changed(GtkWidget *w, gpointer data)
     CtkWlDisplay *page = data;
 
     if (page->updating) return;
+    update_range_info(page);
     mark_dirty(page, TRUE);
 }
 
@@ -1491,6 +1754,7 @@ static GtkWidget *config_row(CtkWlDisplay *page, GtkWidget *table, gint *row,
     gtk_box_pack_start(GTK_BOX(hbox), control, FALSE, FALSE, 0);
     gtk_table_attach(GTK_TABLE(table), hbox, 1, 2, *row, *row + 1,
                      GTK_FILL, GTK_FILL, 0, 0);
+    g_object_set_data(G_OBJECT(hbox), "row-label", label);
     if (help) {
         ctk_config_set_tooltip(page->ctk_config, control, help);
     }
@@ -1623,18 +1887,74 @@ static void build_color_controls(CtkWlDisplay *page, GtkWidget *vbox)
 
     page->rgb_values = g_array_new(FALSE, FALSE, sizeof(gint));
     page->format_values = g_array_new(FALSE, FALSE, sizeof(gint));
+    page->mode_values = g_array_new(FALSE, FALSE, sizeof(gint));
 
     table = ctk_section_table_new(vbox, "Color Controls");
     page->controls_table = table;
     page->rgb_combo = ctk_combo_box_text_new();
-    config_row(page, table, &row, "Color Range:", page->rgb_combo,
-               __rgb_control_help);
+    page->rgb_row = config_row(page, table, &row, "Color Range:",
+                               page->rgb_combo, __rgb_control_help);
+    page->range_info_label = gtk_label_new(NULL);
+    gtk_misc_set_alignment(GTK_MISC(page->range_info_label), 0.0f, 0.5f);
+    page->range_info_row = config_row(page, table, &row, "Color Range:",
+                                      page->range_info_label,
+                                      __range_info_help);
     page->format_combo = ctk_combo_box_text_new();
-    config_row(page, table, &row, "Color Space:", page->format_combo,
-               __format_control_help);
+    page->format_row = config_row(page, table, &row, "Color Space:",
+                                  page->format_combo, __format_control_help);
+    page->mode_combo = ctk_combo_box_text_new();
+    page->mode_row = config_row(page, table, &row, "HDR:", page->mode_combo,
+                                __mode_control_help);
+    {
+        GtkWidget *unit;
+
+        page->sdr_white_spin =
+            gtk_spin_button_new_with_range(80, 1000, 10);
+        gtk_spin_button_set_digits(GTK_SPIN_BUTTON(page->sdr_white_spin), 0);
+        page->sdr_white_row = config_row(page, table, &row,
+                                         "SDR Brightness:",
+                                         page->sdr_white_spin,
+                                         __sdr_white_help);
+        unit = gtk_label_new("cd/m² (nits) in HDR10");
+        gtk_box_pack_start(GTK_BOX(page->sdr_white_row), unit,
+                           FALSE, FALSE, 0);
+        gtk_widget_set_no_show_all(page->sdr_white_row, TRUE);
+        gtk_widget_set_no_show_all(g_object_get_data(
+            G_OBJECT(page->sdr_white_row), "row-label"), TRUE);
+        g_signal_connect(G_OBJECT(page->sdr_white_spin), "value-changed",
+                         G_CALLBACK(controls_changed), page);
+
+        page->peak_spin = gtk_spin_button_new_with_range(0, 10000, 10);
+        gtk_spin_button_set_digits(GTK_SPIN_BUTTON(page->peak_spin), 0);
+        page->peak_row = config_row(page, table, &row, "Peak Brightness:",
+                                    page->peak_spin, __peak_help);
+        page->peak_unit = gtk_label_new(NULL);
+        gtk_box_pack_start(GTK_BOX(page->peak_row), page->peak_unit,
+                           FALSE, FALSE, 0);
+        gtk_widget_set_no_show_all(page->peak_row, TRUE);
+        gtk_widget_set_no_show_all(g_object_get_data(
+            G_OBJECT(page->peak_row), "row-label"), TRUE);
+        g_signal_connect(G_OBJECT(page->peak_spin), "value-changed",
+                         G_CALLBACK(controls_changed), page);
+    }
+    /* fill_color_controls() decides which rows show */
+    gtk_widget_set_no_show_all(page->rgb_row, TRUE);
+    gtk_widget_set_no_show_all(page->format_row, TRUE);
+    gtk_widget_set_no_show_all(page->mode_row, TRUE);
+    gtk_widget_set_no_show_all(page->range_info_row, TRUE);
+    gtk_widget_set_no_show_all(g_object_get_data(G_OBJECT(page->range_info_row),
+                                                 "row-label"), TRUE);
+    gtk_widget_set_no_show_all(g_object_get_data(G_OBJECT(page->rgb_row),
+                                                 "row-label"), TRUE);
+    gtk_widget_set_no_show_all(g_object_get_data(G_OBJECT(page->format_row),
+                                                 "row-label"), TRUE);
+    gtk_widget_set_no_show_all(g_object_get_data(G_OBJECT(page->mode_row),
+                                                 "row-label"), TRUE);
     g_signal_connect(G_OBJECT(page->rgb_combo), "changed",
                      G_CALLBACK(controls_changed), page);
     g_signal_connect(G_OBJECT(page->format_combo), "changed",
+                     G_CALLBACK(controls_changed), page);
+    g_signal_connect(G_OBJECT(page->mode_combo), "changed",
                      G_CALLBACK(controls_changed), page);
 
     hbox = gtk_hbox_new(FALSE, 5);

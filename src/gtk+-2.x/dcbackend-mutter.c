@@ -89,6 +89,27 @@ static gint lookup_choice(GVariant *dict, const gchar *key,
 }
 
 
+/* The color modes Muffin lists as "supported-color-modes", as a mask of
+ * (1 << DcColorMode); FALSE if it lists none. */
+static gboolean color_mode_supported(GVariant *dict, guint *mask)
+{
+    GVariantIter *it;
+    guint32 v;
+
+    *mask = 0;
+    if (!g_variant_lookup(dict, "supported-color-modes", "au", &it)) {
+        return FALSE;
+    }
+    while (g_variant_iter_next(it, "u", &v)) {
+        if (v + 1 < 32) {
+            *mask |= 1u << (v + 1);
+        }
+    }
+    g_variant_iter_free(it);
+    return *mask != 0;
+}
+
+
 /* ---- query -------------------------------------------------------------- */
 
 static void parse_mode(GVariant *mv, DcOutputMode *m, gboolean *current)
@@ -162,6 +183,7 @@ static GList *mutter_query(DcBackend *b, GError **error)
         GVariantIter mit;
         DcOutput *o = g_new0(DcOutput, 1);
         gboolean have_variable = FALSE;
+        guint32 color_mode, sdr_white, peak;
 
         g_variant_get(v, "((&s&s&s&s)@a(siiddada{sv})@a{sv})",
                       &conn, &vendor, &product, &serial, &modes, &mprops);
@@ -180,6 +202,32 @@ static GList *mutter_query(DcBackend *b, GError **error)
         o->color_format = lookup_choice(mprops, "color-format",
                                         "supported-color-formats",
                                         &o->color_formats);
+        /* Muffin's color modes start at 0 (default, SDR) */
+        if (g_variant_lookup(mprops, "color-mode", "u", &color_mode) &&
+            color_mode_supported(mprops, &o->color_modes)) {
+            o->color_mode = (gint) color_mode + 1;
+        }
+        /* Muffin with HDR settings per monitor */
+        if (o->color_modes &&
+            g_variant_lookup(mprops, "hdr-auto-switch", "b",
+                             &o->hdr_auto_switch)) {
+            o->has_hdr_policy = TRUE;
+            g_variant_lookup(mprops, "hdr-auto-switched", "b",
+                             &o->hdr_auto_switched);
+        }
+        if (o->color_modes &&
+            g_variant_lookup(mprops, "sdr-white-level", "u", &sdr_white)) {
+            o->sdr_white_level = sdr_white;
+        }
+        if (o->color_modes &&
+            g_variant_lookup(mprops, "hdr-peak-luminance", "u", &peak)) {
+            o->has_hdr_peak = TRUE;
+            o->hdr_peak_luminance = peak;
+            if (g_variant_lookup(mprops, "hdr-edid-peak-luminance", "u",
+                                 &peak)) {
+                o->hdr_edid_peak = peak;
+            }
+        }
         o->modes = g_array_new(FALSE, FALSE, sizeof(DcOutputMode));
 
         g_variant_iter_init(&mit, modes);
@@ -360,6 +408,23 @@ static gboolean mutter_apply(DcBackend *b, GList *outputs,
                 (o->color_formats & (1u << o->color_format))) {
                 g_variant_builder_add(&mprops, "{sv}", "color-format",
                                       g_variant_new_uint32(o->color_format));
+            }
+            if (o->color_mode_changed && o->color_mode > 0 &&
+                (o->color_modes & (1u << o->color_mode))) {
+                g_variant_builder_add(&mprops, "{sv}", "color-mode",
+                                      g_variant_new_uint32(o->color_mode - 1));
+            }
+            if (o->hdr_auto_switch_changed && o->has_hdr_policy) {
+                g_variant_builder_add(&mprops, "{sv}", "hdr-auto-switch",
+                                      g_variant_new_boolean(o->hdr_auto_switch));
+            }
+            if (o->sdr_white_level_changed && o->sdr_white_level) {
+                g_variant_builder_add(&mprops, "{sv}", "sdr-white-level",
+                                      g_variant_new_uint32(o->sdr_white_level));
+            }
+            if (o->hdr_peak_luminance_changed && o->has_hdr_peak) {
+                g_variant_builder_add(&mprops, "{sv}", "hdr-peak-luminance",
+                                      g_variant_new_uint32(o->hdr_peak_luminance));
             }
             g_variant_builder_add(&mons, "(ss@a{sv})", o->name, m->id,
                                   g_variant_builder_end(&mprops));

@@ -93,10 +93,24 @@ struct _CtkWlDisplay
     GtkWidget *controls_status;
     GtkWidget *rgb_combo;
     GtkWidget *format_combo;
+    GtkWidget *mode_combo;
+    GtkWidget *rgb_row;      /* the rows of the combos above, hidden when */
+    GtkWidget *format_row;   /* the compositor does not offer the setting */
+    GtkWidget *mode_row;
+    GtkWidget *sdr_white_spin;   /* SDR brightness in HDR10, cd/m² */
+    GtkWidget *sdr_white_row;
+    GtkWidget *peak_spin;        /* display peak in cd/m², 0 for the EDID's */
+    GtkWidget *peak_row;
+    GtkWidget *peak_unit;
+    gboolean uses_hdr_policy;    /* the HDR row is Off/Automatic/On */
+    GtkWidget *range_info_row;   /* read-only Color Range for drivers whose */
+    GtkWidget *range_info_label; /* range follows the color space (NVIDIA) */
+    gboolean range_follows_format;
     GtkWidget *controls_apply;
     GtkWidget *controls_reset;
     GArray *rgb_values;          /* gint (DcRgbRange), per combo row */
     GArray *format_values;       /* gint (DcColorFormat), per combo row */
+    GArray *mode_values;         /* gint (DcColorMode), per combo row */
     guint verify_id;             /* checks the kernel took the settings */
     gint requested_rgb;          /* last applied, 0 if unchanged */
     gint requested_format;
