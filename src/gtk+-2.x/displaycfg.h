@@ -114,6 +114,7 @@ gchar         *dc_connector_state_signature(void);
  * no EDID. */
 guint          dc_edid_color_formats(const guchar *edid, gsize len,
                                      const DcMode *mode);
+gboolean       dc_edid_supports_hdr10(const guchar *edid, gsize len);
 
 /* "16:9"; "1920x1080 (16:9)"; "1920x1080 (16:9) @ 60.00 Hz" */
 gchar         *dc_aspect_ratio(guint width, guint height);
@@ -181,6 +182,13 @@ typedef enum {
     DC_COLOR_FORMAT_YCBCR420 = 5,
 } DcColorFormat;
 
+/* How the output signals color.  Numbered from 1 like the settings above,
+ * so 0 means it cannot be set; Muffin numbers them from 0. */
+typedef enum {
+    DC_COLOR_MODE_SDR = 1,
+    DC_COLOR_MODE_HDR10 = 2,    /* BT.2100: PQ with BT.2020 primaries */
+} DcColorMode;
+
 typedef struct _DcOutputMode {
     gchar   *id;              /* backend identifier */
     guint    width;
@@ -212,6 +220,22 @@ typedef struct _DcOutput {
     guint    rgb_ranges;      /* bit mask of (1 << DcRgbRange) allowed */
     gint     color_format;    /* DcColorFormat, 0 if it cannot be set */
     guint    color_formats;   /* bit mask of (1 << DcColorFormat) allowed */
+    gint     color_mode;      /* DcColorMode, 0 if it cannot be set */
+    guint    color_modes;     /* bit mask of (1 << DcColorMode) allowed */
+    gboolean color_mode_changed; /* send color_mode; otherwise the compositor
+                                  * keeps the current one, which it may have
+                                  * switched to by itself (HDR passthrough) */
+    gboolean has_hdr_policy;  /* the compositor reports hdr_auto_switch */
+    gboolean hdr_auto_switch; /* HDR passthrough may switch to HDR10 */
+    gboolean hdr_auto_switched; /* the HDR10 mode is passthrough's, not the
+                                 * configuration's */
+    gboolean hdr_auto_switch_changed;
+    guint    sdr_white_level; /* cd/m² in HDR10, 0 if it cannot be set */
+    gboolean sdr_white_level_changed;
+    gboolean has_hdr_peak;    /* the compositor reports hdr_peak_luminance */
+    guint    hdr_peak_luminance; /* cd/m² set by the user, 0 for the EDID's */
+    guint    hdr_edid_peak;   /* cd/m² from the EDID, 0 if not given */
+    gboolean hdr_peak_luminance_changed;
 
     GArray  *modes;           /* DcOutputMode */
     gint     current_mode;    /* index into modes, -1 if none */

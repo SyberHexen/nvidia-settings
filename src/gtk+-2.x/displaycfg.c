@@ -901,6 +901,7 @@ typedef struct {
     guint n_svds;
     guint64 cmdb_map;
     gboolean y420;           /* the mode can be sent as YCbCr 4:2:0 */
+    guint8 hdr_eotfs;        /* HDR static metadata block: EOTFs, 0 if none */
     const DcMode *mode;
 } CtaState;
 
@@ -943,6 +944,10 @@ static void parse_cta_data_blocks(const guchar *p, guint len, CtaState *st)
             for (i = 1; i < l && i <= 8; i++) {
                 st->cmdb_map |= (guint64) data[i] << (8 * (i - 1));
             }
+        } else if (tag == 7 && l >= 2 && data[0] == 0x06) {
+            /* HDR static metadata block: the transfer functions (EOTFs)
+             * the display accepts */
+            st->hdr_eotfs |= data[1];
         }
         pos += 1 + l;
     }
@@ -963,6 +968,39 @@ static void parse_displayid(const guchar *x, CtaState *st)
         }
         pos += 3 + l;
     }
+}
+
+
+/* Gather the CTA-861 data blocks of all CTA and DisplayID extensions */
+static void parse_edid_extensions(const guchar *edid, gsize len,
+                                  CtaState *st)
+{
+    guint blocks = MIN(edid[126], len / 128 - 1), b;
+
+    for (b = 1; b <= blocks; b++) {
+        const guchar *x = edid + 128 * b;
+
+        if (x[0] == 0x02 && x[2] >= 4) {          /* CTA-861 extension */
+            parse_cta_data_blocks(x + 4, MIN(x[2], 127u) - 4, st);
+        } else if (x[0] == 0x70) {                /* DisplayID extension */
+            parse_displayid(x, st);
+        }
+    }
+}
+
+
+/* Whether the display accepts HDR10: an HDR static metadata block that lists
+ * the SMPTE ST 2084 (PQ) transfer function.  TRUE without a usable EDID, so
+ * nothing is withheld from a display that cannot be read. */
+gboolean dc_edid_supports_hdr10(const guchar *edid, gsize len)
+{
+    CtaState st = { 0 };
+
+    if (!edid || len < 128) {
+        return TRUE;
+    }
+    parse_edid_extensions(edid, len, &st);
+    return (st.hdr_eotfs & 0x04) != 0;
 }
 
 
@@ -994,13 +1032,9 @@ guint dc_edid_color_formats(const guchar *edid, gsize len,
         if (x[0] == 0x02) {                       /* CTA-861 extension */
             if (x[3] & 0x20) mask |= 1u << DC_COLOR_FORMAT_YCBCR444;
             if (x[3] & 0x10) mask |= 1u << DC_COLOR_FORMAT_YCBCR422;
-            if (x[2] >= 4) {
-                parse_cta_data_blocks(x + 4, MIN(x[2], 127u) - 4, &st);
-            }
-        } else if (x[0] == 0x70) {                /* DisplayID extension */
-            parse_displayid(x, &st);
         }
     }
+    parse_edid_extensions(edid, len, &st);
 
     /*
      * 4:2:0 is defined for progressive modes only, so vic_matches_mode()
