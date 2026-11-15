@@ -2039,7 +2039,8 @@ GtkWidget *ctk_wl_display_new(const gchar *card, const gchar *connector,
     page->backend = dc_backend();
     if (page->backend) {
         build_color_controls(page, cvbox);
-        if (page->backend->get_gamma && page->backend->set_gamma) {
+        if ((page->backend->get_gamma && page->backend->set_gamma) ||
+            page->backend->set_color_correction) {
             page->cc_box = tab_box(notebook, "Color Correction");
         }
     }

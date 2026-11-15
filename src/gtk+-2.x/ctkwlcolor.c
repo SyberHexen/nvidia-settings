@@ -3,8 +3,10 @@
  * and Linux systems.
  *
  * Color correction (brightness, contrast, gamma) of a display under
- * Wayland.  The ramps are computed as on the X Color Correction page and
- * handed to the compositor, which owns the CRTC gamma tables.
+ * Wayland.  A compositor that keeps a color correction per display (Muffin)
+ * gets the values and applies them on top of its own gamma ramp (Night
+ * Light); otherwise the ramps are computed as on the X Color Correction page
+ * and handed to the compositor, which owns the CRTC gamma tables.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -59,6 +61,9 @@ static const char *__note_text =
 "Applied immediately through the compositor.  These settings are not "
 "saved: they end when you log out, and the desktop may replace them (for "
 "example Night Light or a color profile).";
+static const char *__saved_note_text =
+"Applied immediately and saved for this display by the compositor, on top "
+"of Night Light.";
 
 typedef struct {
     DcBackend *backend;
@@ -72,6 +77,7 @@ typedef struct {
     GtkAdjustment *gamma;
 
     NvCtrlGammaInput input;
+    gboolean use_correction;  /* compositor keeps the values (Muffin) */
     guint size;
     gushort *ramp[3];
 
@@ -114,7 +120,9 @@ static void get_ramp(gpointer data, gint channel, gushort **lut, gint *n)
 
 static void set_status(WlColor *wc, const gchar *text)
 {
-    gtk_label_set_text(GTK_LABEL(wc->status), text ? text : __note_text);
+    gtk_label_set_text(GTK_LABEL(wc->status),
+                       text ? text : wc->use_correction ? __saved_note_text
+                                                        : __note_text);
 }
 
 
@@ -122,12 +130,27 @@ static gboolean apply_now(gpointer data)
 {
     WlColor *wc = data;
     GError *error = NULL;
+    gboolean ok;
 
     wc->apply_id = 0;
-    if (!wc->backend->set_gamma(wc->backend, wc->output, wc->size,
-                                wc->ramp[RED_CHANNEL_INDEX],
-                                wc->ramp[GREEN_CHANNEL_INDEX],
-                                wc->ramp[BLUE_CHANNEL_INDEX], &error)) {
+    if (wc->use_correction) {
+        gdouble values[DC_COLOR_CORRECTION_N];
+        gint ch;
+
+        for (ch = 0; ch < 3; ch++) {
+            values[ch] = wc->input.brightness[ch];
+            values[3 + ch] = wc->input.contrast[ch];
+            values[6 + ch] = wc->input.gamma[ch];
+        }
+        ok = wc->backend->set_color_correction(wc->backend, wc->output,
+                                               values, &error);
+    } else {
+        ok = wc->backend->set_gamma(wc->backend, wc->output, wc->size,
+                                    wc->ramp[RED_CHANNEL_INDEX],
+                                    wc->ramp[GREEN_CHANNEL_INDEX],
+                                    wc->ramp[BLUE_CHANNEL_INDEX], &error);
+    }
+    if (!ok) {
         gchar *s = g_strdup_printf("Unable to set the color correction: %s",
                                    error->message);
         set_status(wc, s);
@@ -253,12 +276,28 @@ GtkWidget *ctk_wl_color_correction_new(DcBackend *backend,
     GError *error = NULL;
     guint16 *r = NULL, *g = NULL, *b = NULL;
     guint size = 0;
+    gdouble values[DC_COLOR_CORRECTION_N];
+    gboolean use_correction = FALSE;
 
     top = gtk_vbox_new(FALSE, 10);
     gtk_container_set_border_width(GTK_CONTAINER(top), 5);
 
-    if (!backend || !backend->get_gamma || !backend->set_gamma ||
-        !backend->get_gamma(backend, output, &size, &r, &g, &b, &error)) {
+    if (backend && backend->get_color_correction &&
+        backend->set_color_correction) {
+        use_correction = backend->get_color_correction(backend, output,
+                                                       values, NULL);
+    }
+    /* The ramp size is used for the curve (and the ramps sent without a
+     * compositor color correction) */
+    if (backend && backend->get_gamma && backend->set_gamma &&
+        backend->get_gamma(backend, output, &size, &r, &g, &b,
+                           use_correction ? NULL : &error)) {
+        g_free(r);
+        g_free(g);
+        g_free(b);
+    } else if (use_correction) {
+        size = 256;
+    } else {
         gchar *s = g_strdup_printf("Color correction is not available for "
                                    "this display%s%s",
                                    error ? ": " : ".",
@@ -271,12 +310,9 @@ GtkWidget *ctk_wl_color_correction_new(DcBackend *backend,
         gtk_box_pack_start(GTK_BOX(top), label, FALSE, FALSE, 0);
         return top;
     }
-    /* Only the ramp size is used: the sliders start from the defaults, and
-     * nothing is sent until one of them moves */
-    g_free(r);
-    g_free(g);
-    g_free(b);
 
+    /* The sliders start from the saved correction, or from the defaults
+     * when the ramps are sent; nothing is sent until one of them moves */
     wc = g_new0(WlColor, 1);
     wc->backend = backend;
     wc->output = g_strdup(output);
@@ -284,7 +320,17 @@ GtkWidget *ctk_wl_color_correction_new(DcBackend *backend,
     wc->ramp[0] = g_new0(gushort, size);
     wc->ramp[1] = g_new0(gushort, size);
     wc->ramp[2] = g_new0(gushort, size);
+    wc->use_correction = use_correction;
     NvCtrlInitGammaInputStruct(&wc->input);
+    if (use_correction) {
+        gint ch;
+
+        for (ch = 0; ch < 3; ch++) {
+            wc->input.brightness[ch] = values[ch];
+            wc->input.contrast[ch] = values[3 + ch];
+            wc->input.gamma[ch] = values[6 + ch];
+        }
+    }
     NvCtrlUpdateGammaRamp(&wc->input, size, wc->ramp, ALL_CHANNELS);
     g_object_set_data_full(G_OBJECT(top), "wl-color", wc, wl_color_free);
 
@@ -356,6 +402,7 @@ GtkWidget *ctk_wl_color_correction_new(DcBackend *backend,
     wc->gamma = new_adjustment(wc, GAMMA_VALUE, GAMMA_DEFAULT, GAMMA_MIN,
                                GAMMA_MAX);
     add_scale(wc, rightvbox, wc->gamma, "Gamma", __gamma_help, ctk_config);
+    load_sliders(wc);
 
     gtk_box_pack_start(GTK_BOX(top), gtk_hseparator_new(), FALSE, FALSE, 0);
 
@@ -382,7 +429,9 @@ void ctk_wl_color_correction_help(GtkTextBuffer *b, GtkTextIter *i)
     ctk_help_heading(b, i, "Color Correction");
     ctk_help_para(b, i, "Adjusts brightness, contrast and gamma of this "
                   "display, for all color channels or one at a time.  "
-                  "%s", __note_text);
+                  "When the compositor keeps a color correction per display "
+                  "(Cinnamon): %s  Otherwise: %s", __saved_note_text,
+                  __note_text);
     ctk_help_heading(b, i, "Active Color Channel");
     ctk_help_para(b, i, "%s", __channel_help);
     ctk_help_heading(b, i, "Brightness, Contrast and Gamma");
