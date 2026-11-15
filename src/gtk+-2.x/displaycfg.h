@@ -258,6 +258,9 @@ enum {
 
 typedef struct _DcBackend DcBackend;
 
+/* Values of a color correction (see DcBackend.get_color_correction) */
+#define DC_COLOR_CORRECTION_N 9
+
 struct _DcBackend {
     const gchar *name;        /* "Mutter DisplayConfig" */
     guint caps;
@@ -280,7 +283,20 @@ struct _DcBackend {
                           const guint16 *red, const guint16 *green,
                           const guint16 *blue, GError **error);
 
-    GList   *watches;         /* internal: change callbacks */
+    /* The color correction the compositor keeps for the output named
+     * 'output' and applies on top of its gamma ramp (Night Light), so the
+     * two do not undo each other: brightness RGB, contrast RGB, gamma RGB.
+     * NULL, or get fails with G_IO_ERROR_NOT_SUPPORTED, if the compositor
+     * has none; use the gamma ramps then. */
+    gboolean (*get_color_correction)(DcBackend *b, const gchar *output,
+                                     gdouble values[DC_COLOR_CORRECTION_N],
+                                     GError **error);
+    gboolean (*set_color_correction)(DcBackend *b, const gchar *output,
+                                     const gdouble
+                                         values[DC_COLOR_CORRECTION_N],
+                                     GError **error);
+
+    GList   *watches;        /* internal: change callbacks */
     guint    notify_id;       /* internal: debounce source */
     GList   *cache;           /* internal: snapshot for dc_backend_outputs */
     gboolean cache_valid;

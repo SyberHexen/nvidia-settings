@@ -580,6 +580,96 @@ static gboolean mutter_set_gamma(DcBackend *b, const gchar *output,
 }
 
 
+/* ---- color correction --------------------------------------------------- */
+
+/* Muffin keeps a color correction per display (GetCurrentState monitor
+ * property "color-correction", SetMonitorColorCorrection) and applies it on
+ * top of the gamma ramp Night Light sets.  Mutter has neither. */
+static gboolean mutter_get_color_correction(DcBackend *b, const gchar *output,
+                                            gdouble values[DC_COLOR_CORRECTION_N],
+                                            GError **error)
+{
+    MutterPriv *p = b->priv;
+    GVariant *reply, *monitors, *v;
+    GVariantIter it;
+    gboolean found = FALSE, supported = FALSE;
+
+    reply = call(p, "GetCurrentState", NULL,
+                 G_VARIANT_TYPE("(ua((ssss)a(siiddada{sv})a{sv})"
+                                "a(iiduba(ssss)a{sv})a{sv})"), error);
+    if (!reply) {
+        if (error && *error) {
+            g_dbus_error_strip_remote_error(*error);
+        }
+        return FALSE;
+    }
+    g_variant_get(reply, "(u@a((ssss)a(siiddada{sv})a{sv})"
+                         "@a(iiduba(ssss)a{sv})@a{sv})",
+                  NULL, &monitors, NULL, NULL);
+    g_variant_iter_init(&it, monitors);
+    while (!found && (v = g_variant_iter_next_value(&it))) {
+        const gchar *conn;
+        GVariant *mprops, *cc;
+
+        g_variant_get(v, "((&ssss)a(siiddada{sv})@a{sv})", &conn, NULL,
+                      NULL, NULL, NULL, &mprops);
+        if (g_strcmp0(conn, output) == 0) {
+            found = TRUE;
+            cc = g_variant_lookup_value(mprops, "color-correction",
+                                        G_VARIANT_TYPE("ad"));
+            if (cc) {
+                gsize n;
+                const gdouble *d = g_variant_get_fixed_array(cc, &n,
+                                                             sizeof(gdouble));
+                if (n == DC_COLOR_CORRECTION_N) {
+                    memcpy(values, d, n * sizeof(gdouble));
+                    supported = TRUE;
+                }
+                g_variant_unref(cc);
+            }
+        }
+        g_variant_unref(mprops);
+        g_variant_unref(v);
+    }
+    g_variant_unref(monitors);
+    g_variant_unref(reply);
+
+    if (!found) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                    "%s is not connected.", output);
+    } else if (!supported) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                    "The compositor keeps no color correction.");
+    }
+    return supported;
+}
+
+
+static gboolean mutter_set_color_correction(DcBackend *b, const gchar *output,
+                                            const gdouble
+                                                values[DC_COLOR_CORRECTION_N],
+                                            GError **error)
+{
+    MutterPriv *p = b->priv;
+    GVariant *reply;
+
+    reply = call(p, "SetMonitorColorCorrection",
+                 g_variant_new("(s@ad)", output,
+                     g_variant_new_fixed_array(G_VARIANT_TYPE_DOUBLE, values,
+                                               DC_COLOR_CORRECTION_N,
+                                               sizeof(gdouble))),
+                 NULL, error);
+    if (!reply) {
+        if (error && *error) {
+            g_dbus_error_strip_remote_error(*error);
+        }
+        return FALSE;
+    }
+    g_variant_unref(reply);
+    return TRUE;
+}
+
+
 /* ---- construction ------------------------------------------------------- */
 
 static void monitors_changed(GDBusConnection *bus, const gchar *sender,
@@ -619,6 +709,8 @@ DcBackend *dc_backend_mutter_new(const gchar *bus_name,
     b->apply = mutter_apply;
     b->get_gamma = mutter_get_gamma;
     b->set_gamma = mutter_set_gamma;
+    b->get_color_correction = mutter_get_color_correction;
+    b->set_color_correction = mutter_set_color_correction;
     b->priv = p;
 
     /* Is the interface there? */
