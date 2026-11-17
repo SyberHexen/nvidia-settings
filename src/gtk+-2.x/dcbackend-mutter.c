@@ -89,6 +89,55 @@ static gint lookup_choice(GVariant *dict, const gchar *key,
 }
 
 
+/* Muffin's "vrr-mode": 0 off, 1 automatic (while a window is fullscreen),
+ * 2 always */
+static DcVrr vrr_from_muffin(guint32 mode)
+{
+    switch (mode) {
+    case 0: return DC_VRR_NEVER;
+    case 1: return DC_VRR_AUTOMATIC;
+    case 2: return DC_VRR_ALWAYS;
+    }
+    return DC_VRR_UNSUPPORTED;
+}
+
+static guint32 vrr_to_muffin(DcVrr vrr)
+{
+    switch (vrr) {
+    case DC_VRR_AUTOMATIC: return 1;
+    case DC_VRR_ALWAYS:    return 2;
+    default:               return 0;
+    }
+}
+
+/* Muffin (Cinnamon) offers the VRR policy of a VRR capable monitor as
+ * "vrr-mode" (u) plus "supported-vrr-modes" (au). */
+static void lookup_muffin_vrr(GVariant *dict, DcOutput *o)
+{
+    guint32 mode, v;
+    guint mask = 0;
+    GVariantIter *it;
+
+    if (!g_variant_lookup(dict, "vrr-mode", "u", &mode) ||
+        !g_variant_lookup(dict, "supported-vrr-modes", "au", &it)) {
+        return;
+    }
+    while (g_variant_iter_next(it, "u", &v)) {
+        DcVrr vrr = vrr_from_muffin(v);
+        if (vrr != DC_VRR_UNSUPPORTED) {
+            mask |= 1u << vrr;
+        }
+    }
+    g_variant_iter_free(it);
+
+    if (mask && vrr_from_muffin(mode) != DC_VRR_UNSUPPORTED) {
+        o->vrr = vrr_from_muffin(mode);
+        o->vrr_policies = mask;
+        o->vrr_mode_setting = TRUE;
+    }
+}
+
+
 /* The color modes Muffin lists as "supported-color-modes", as a mask of
  * (1 << DcColorMode); FALSE if it lists none. */
 static gboolean color_mode_supported(GVariant *dict, guint *mask)
@@ -202,6 +251,7 @@ static GList *mutter_query(DcBackend *b, GError **error)
         o->color_format = lookup_choice(mprops, "color-format",
                                         "supported-color-formats",
                                         &o->color_formats);
+        lookup_muffin_vrr(mprops, o);
         /* Muffin's color modes start at 0 (default, SDR) */
         if (g_variant_lookup(mprops, "color-mode", "u", &color_mode) &&
             color_mode_supported(mprops, &o->color_modes)) {
@@ -244,7 +294,7 @@ static GList *mutter_query(DcBackend *b, GError **error)
             g_variant_unref(mv);
         }
         /* GNOME 46+: VRR is offered as a "variable" twin of each mode */
-        if (have_variable) {
+        if (have_variable && !o->vrr_mode_setting) {
             o->vrr_policies = (1 << DC_VRR_NEVER) | (1 << DC_VRR_ALWAYS);
             o->vrr = (o->current_mode >= 0 &&
                       g_array_index(o->modes, DcOutputMode,
@@ -408,6 +458,11 @@ static gboolean mutter_apply(DcBackend *b, GList *outputs,
                 (o->color_formats & (1u << o->color_format))) {
                 g_variant_builder_add(&mprops, "{sv}", "color-format",
                                       g_variant_new_uint32(o->color_format));
+            }
+            if (o->vrr_mode_setting && o->vrr != DC_VRR_UNSUPPORTED &&
+                (o->vrr_policies & (1u << o->vrr))) {
+                g_variant_builder_add(&mprops, "{sv}", "vrr-mode",
+                                      g_variant_new_uint32(vrr_to_muffin(o->vrr)));
             }
             if (o->color_mode_changed && o->color_mode > 0 &&
                 (o->color_modes & (1u << o->color_mode))) {
