@@ -216,6 +216,7 @@ typedef struct _DcOutput {
     gboolean primary;
     DcVrr    vrr;             /* current policy, or DC_VRR_UNSUPPORTED */
     guint    vrr_policies;    /* bit mask of (1 << DcVrr) allowed */
+    gboolean vrr_mode_setting; /* Muffin: the policy is its "vrr-mode" */
     gint     rgb_range;       /* DcRgbRange, 0 if it cannot be set */
     guint    rgb_ranges;      /* bit mask of (1 << DcRgbRange) allowed */
     gint     color_format;    /* DcColorFormat, 0 if it cannot be set */
