@@ -680,6 +680,37 @@ static gchar *mesa_version(GList *devices, GList *gl_devices)
 
 /* ---- AMD ---------------------------------------------------------------- */
 
+/*
+ * The amdgpu and radeon X drivers name their provider "<chip name> @ pci:<bus
+ * id>": tell them apart by the kernel driver bound to that PCI device.
+ */
+static const char *provider_driver_from_bus_id(const char *name)
+{
+    const char *pci = strstr(name, " @ pci:");
+    gchar *link, *target;
+    const char *desc = NULL;
+
+    if (!pci) {
+        return NULL;
+    }
+    link = g_strdup_printf("/sys/bus/pci/devices/%s/driver",
+                           pci + strlen(" @ pci:"));
+    target = g_file_read_link(link, NULL);
+    if (target) {
+        gchar *driver = g_path_get_basename(target);
+
+        if (strcmp(driver, "amdgpu") == 0) {
+            desc = "xf86-video-amdgpu";
+        } else if (strcmp(driver, "radeon") == 0) {
+            desc = "xf86-video-ati (radeon)";
+        }
+        g_free(driver);
+        g_free(target);
+    }
+    g_free(link);
+    return desc;
+}
+
 static gchar *x_display_driver(void)
 {
     Display *dpy = ctk_amd_display_get_xdisplay();
@@ -717,6 +748,8 @@ static gchar *x_display_driver(void)
             desc = "xf86-video-amdgpu";
         } else if (g_ascii_strncasecmp(pi->name, "radeon", 6) == 0) {
             desc = "xf86-video-ati (radeon)";
+        } else {
+            desc = provider_driver_from_bus_id(pi->name);
         }
         if (s->len) g_string_append(s, ", ");
         if (desc) {
